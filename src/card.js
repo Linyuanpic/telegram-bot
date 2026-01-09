@@ -82,15 +82,6 @@ export async function redeemCardCode(env, userId, code) {
       return { ok: false, reason: "invalid" };
     }
 
-    const claimed = await db
-      .prepare(`UPDATE codes SET status='used', used_by=?, used_at=? WHERE code=? AND status='unused'`)
-      .bind(userId, t, normalized)
-      .run();
-
-    if (!claimed || claimed.success !== true || claimed.meta?.changes !== 1) {
-      return { ok: false, reason: "used" };
-    }
-
     previous = await db
       .prepare(`SELECT user_id, verified_at, expire_at FROM memberships WHERE user_id=?`)
       .bind(userId)
@@ -99,20 +90,31 @@ export async function redeemCardCode(env, userId, code) {
     const baseExpire = wasMember ? previous.expire_at : t;
     newExpire = baseExpire + codeRow.days * 86400;
 
-    try {
-      if (previous) {
-        await db.prepare(`UPDATE memberships SET expire_at=?, updated_at=? WHERE user_id=?`).bind(newExpire, t, userId).run();
-      } else {
-        await db.prepare(`INSERT INTO memberships(user_id, verified_at, expire_at, updated_at) VALUES (?,?,?,?)`)
-          .bind(userId, t, newExpire, t).run();
-      }
-    } catch (membershipErr) {
-      await db.prepare(
-        `UPDATE codes SET status='unused', used_by=NULL, used_at=NULL WHERE code=? AND used_by=? AND used_at=?`
-      ).bind(normalized, userId, t).run();
-      throw membershipErr;
+    await db.exec("BEGIN");
+    if (previous) {
+      await db.prepare(`UPDATE memberships SET expire_at=?, updated_at=? WHERE user_id=?`).bind(newExpire, t, userId).run();
+    } else {
+      await db.prepare(`INSERT INTO memberships(user_id, verified_at, expire_at, updated_at) VALUES (?,?,?,?)`)
+        .bind(userId, t, newExpire, t).run();
     }
+
+    const claimed = await db
+      .prepare(`UPDATE codes SET status='used', used_by=?, used_at=? WHERE code=? AND status='unused'`)
+      .bind(userId, t, normalized)
+      .run();
+
+    if (!claimed || claimed.success !== true || claimed.meta?.changes !== 1) {
+      await db.exec("ROLLBACK");
+      return { ok: false, reason: "used" };
+    }
+
+    await db.exec("COMMIT");
   } catch (e) {
+    try {
+      await db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback errors
+    }
     console.error("D1 error", e);
     return { ok: false, reason: "db_unavailable" };
   }
