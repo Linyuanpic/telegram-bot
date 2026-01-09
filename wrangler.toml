@@ -1,5 +1,5 @@
 name = "linyuan-bot"
-main = "src/worker.js"
+main = "src/index.js"
 compatibility_date = "2026-01-04"
 
 [[d1_databases]]
