@@ -90,31 +90,31 @@ export async function redeemCardCode(env, userId, code) {
     const baseExpire = wasMember ? previous.expire_at : t;
     newExpire = baseExpire + codeRow.days * 86400;
 
-    await db.exec("BEGIN");
-    if (previous) {
-      await db.prepare(`UPDATE memberships SET expire_at=?, updated_at=? WHERE user_id=?`).bind(newExpire, t, userId).run();
-    } else {
-      await db.prepare(`INSERT INTO memberships(user_id, verified_at, expire_at, updated_at) VALUES (?,?,?,?)`)
-        .bind(userId, t, newExpire, t).run();
-    }
-
     const claimed = await db
-      .prepare(`UPDATE codes SET status='used', used_by=?, used_at=? WHERE code=? AND status='unused'`)
-      .bind(userId, t, normalized)
-      .run();
+      .prepare(
+        `WITH claimed AS (
+          UPDATE codes
+          SET status='used', used_by=?, used_at=?
+          WHERE code=? AND status='unused'
+          RETURNING 1
+        ),
+        upsert AS (
+          INSERT INTO memberships(user_id, verified_at, expire_at, updated_at)
+          SELECT ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM claimed)
+          ON CONFLICT(user_id) DO UPDATE SET
+            expire_at=excluded.expire_at,
+            updated_at=excluded.updated_at
+        )
+        SELECT COUNT(*) AS claimed FROM claimed`
+      )
+      .bind(userId, t, normalized, userId, t, newExpire, t)
+      .first();
 
-    if (!claimed || claimed.success !== true || claimed.meta?.changes !== 1) {
-      await db.exec("ROLLBACK");
+    if (!claimed || Number(claimed.claimed || 0) !== 1) {
       return { ok: false, reason: "used" };
     }
-
-    await db.exec("COMMIT");
   } catch (e) {
-    try {
-      await db.exec("ROLLBACK");
-    } catch {
-      // ignore rollback errors
-    }
     console.error("D1 error", e);
     return { ok: false, reason: "db_unavailable" };
   }
