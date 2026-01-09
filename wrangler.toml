@@ -1,15 +1,15 @@
-name = "linyuan-bot"
+name = "telegram-bot"
 main = "src/index.js"
 compatibility_date = "2026-01-04"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "linyuanpic-bot"
-database_id = "9359a3db-d914-4ec6-aba3-f74842e13a42"
+database_name = "telegram-bot"
+database_id = "eeddd9c9-7db3-4eb4-bb94-b4b311b258ec"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "8c0ca324d0384ec4ae826f95e76f46d3"
+id = "61884290f78648e6b004363952a3cdb2"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -17,6 +17,6 @@ crons = ["*/5 * * * *"]
 [vars]
 ADMIN_USER_IDS = "7204268059"
 TZ = "Asia/Shanghai"
-BOT_TOKEN = "8366967396:AAEvVWxP6PVJfAqNXm-Lh2xfZzTzniUYxGA"
+BOT_TOKEN = "8366967396:AAG7whdYwalgpx1ICOWTk6WcUvs-loYAQN8"
 
 # You will set secrets via: wrangler secret put BOT_TOKEN
