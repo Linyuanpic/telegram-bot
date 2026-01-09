@@ -1,803 +1,57 @@
-/**
-
- * Telegram Card-Key Membership Bot (Cloudflare Worker + D1 + KV)
- *
- * Features:
- * - /start with configurable template + fixed buttons (Verify / Support)
- * - One-time codes (card keys) that add membership days (global membership)
- * - Join request approval for managed chats only
- * - Expired members are removed from managed chats (only those approved by bot)
- * - Support session forwarding to admin, anti-spam auto-close
- * - Admin web panel with TG user_id login code
- * - Manual broadcasts + auto reminders via cron (queue + batch send)
- *
- * Configure:
- * - Secrets: BOT_TOKEN
- * - Vars: ADMIN_USER_IDS, TZ, BOT_USERNAME
- * - Bindings: DB (D1), KV (KV namespace)
- * - Optional Vars: D1_BINDING, KV_BINDING (override binding names)
- */
-
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
-const DEFAULT_D1_BINDING = "DB";
-const DEFAULT_KV_BINDING = "KV";
-const TEMPLATE_SORT_ORDER = [
-  "start",
-  "ask_code",
-  "support_open",
-  "support_closed",
-  "support_closed_spam",
-  "vip_new",
-  "vip_renew",
-  "image_limit_nonmember",
-  "image_limit_member",
-  "image_limit",
-  "exp_before_30d",
-  "exp_before_15d",
-  "exp_before_7d",
-  "exp_before_3d",
-  "exp_before_1d",
-  "nonmember_monthly",
-  "exp_after_1d",
-  "exp_after_3d",
-  "exp_after_7d",
-  "exp_after_15d",
-  "exp_after_30d",
-];
-const IMAGE_REPLY_TEMPLATE_KEY = "image_reply";
-const SUPPORT_CLOSED_TEMPLATE_KEY = "support_closed";
-const IMAGE_LIMIT_MEMBER_TEMPLATE_KEY = "image_limit_member";
-const IMAGE_LIMIT_NONMEMBER_TEMPLATE_KEY = "image_limit_nonmember";
-const IMAGE_REPLY_DEFAULT_TEXT = "自助搜图，具体内容点击下方按钮～";
-const IMAGE_REPLY_DEFAULT_BUTTONS = [
-  [{ text: "GoogleLens → 看看这是谁", type: "url", url: "{{google_lens}}" }],
-  [{ text: "Yandex.ru → 想找图片来源", type: "url", url: "{{yandex}}" }]
-];
-const IMAGE_PROXY_PREFIX = "/tgimg/";
-const IMAGE_PROXY_TTL_SEC = 15 * 60;
-const IMAGE_PROXY_RATE_LIMIT = 3;
-const IMAGE_PROXY_RATE_WINDOW = 60;
-const FILE_PATH_CACHE_TTL = 7 * 24 * 3600;
-const CARD_CODE_LENGTH = 18;
-const IMAGE_DAILY_LIMIT_MEMBER = 100;
-const IMAGE_DAILY_LIMIT_NON_MEMBER = 10;
-const SUPPORT_SPAM_BAN_TTL_SEC = 60 * 60;
-
-function nowSec() { return Math.floor(Date.now() / 1000); }
-function resolveBindingName(env, key, fallback) {
-  const raw = env?.[key];
-  if (typeof raw !== "string") return fallback;
-  const trimmed = raw.trim();
-  return trimmed ? trimmed : fallback;
-}
-function getDb(env) {
-  const name = resolveBindingName(env, "D1_BINDING", DEFAULT_D1_BINDING);
-  const db = env?.[name];
-  if (db) return db;
-  if (name !== DEFAULT_D1_BINDING && env?.[DEFAULT_D1_BINDING]) {
-    console.warn(`D1 binding ${name} not found. Falling back to ${DEFAULT_D1_BINDING}.`);
-    return env?.[DEFAULT_D1_BINDING];
-  }
-  return db;
-}
-function getKv(env) {
-  const name = resolveBindingName(env, "KV_BINDING", DEFAULT_KV_BINDING);
-  const kv = env?.[name];
-  if (kv) return kv;
-  if (name !== DEFAULT_KV_BINDING && env?.[DEFAULT_KV_BINDING]) {
-    console.warn(`KV binding ${name} not found. Falling back to ${DEFAULT_KV_BINDING}.`);
-    return env?.[DEFAULT_KV_BINDING];
-  }
-  return kv;
-}
-function validateEnv(env) {
-  const issues = [];
-  if (!env.BOT_TOKEN) issues.push("Missing BOT_TOKEN secret.");
-  const d1Name = resolveBindingName(env, "D1_BINDING", DEFAULT_D1_BINDING);
-  const kvName = resolveBindingName(env, "KV_BINDING", DEFAULT_KV_BINDING);
-  if (!getDb(env)) issues.push(`Missing D1 binding: ${d1Name}.`);
-  if (!getKv(env)) issues.push(`Missing KV binding: ${kvName}.`);
-  if (!env.ADMIN_USER_IDS) issues.push("Missing ADMIN_USER_IDS.");
-  return issues;
-}
-function parseAdminIds(env) {
-  return (env.ADMIN_USER_IDS || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)
-    .map(s => Number(s))
-    .filter(n => Number.isFinite(n));
-}
-const WEEKDAY_INDEX = {
-  Sun: 7,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
-
-function getTzParts(date, tz) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const partMap = parts.reduce((acc, part) => {
-    if (part.type !== "literal") acc[part.type] = part.value;
-    return acc;
-  }, {});
-  return {
-    year: Number(partMap.year || 0),
-    month: Number(partMap.month || 0),
-    day: Number(partMap.day || 0),
-  };
-}
-
-function getTimeZoneOffsetMinutes(tz, date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  }).formatToParts(date).reduce((acc, p) => {
-    if (p.type !== "literal") acc[p.type] = p.value;
-    return acc;
-  }, {});
-  const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
-  return (asUTC - date.getTime()) / 60000;
-}
-
-function getTzDayStart(tsSec, tz = "Asia/Shanghai") {
-  const date = new Date(tsSec * 1000);
-  const parts = getTzParts(date, tz);
-  const utcMid = Date.UTC(parts.year, parts.month - 1, parts.day, 0, 0, 0);
-  const offsetMin = getTimeZoneOffsetMinutes(tz, new Date(utcMid));
-  return Math.floor((utcMid - offsetMin * 60000) / 1000);
-}
-
-function getTzWeekStart(tsSec, tz = "Asia/Shanghai") {
-  const weekdayName = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(new Date(tsSec * 1000));
-  const weekdayIndex = WEEKDAY_INDEX[weekdayName] || 7;
-  const dayStart = getTzDayStart(tsSec, tz);
-  return dayStart - (weekdayIndex - 1) * 86400;
-}
-
-function getTzDateKey(tsSec, tz = "Asia/Shanghai") {
-  const parts = getTzParts(new Date(tsSec * 1000), tz);
-  const mm = String(parts.month).padStart(2, "0");
-  const dd = String(parts.day).padStart(2, "0");
-  return `${parts.year}-${mm}-${dd}`;
-}
-
-function fmtDateTime(tsSec, tz = "Asia/Shanghai") {
-  // Use Intl for timezone formatting
-  const dt = new Date(tsSec * 1000);
-  const parts = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: tz,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hour12: false
-  }).formatToParts(dt);
-  const get = (t) => parts.find(p => p.type === t)?.value || "";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
-}
-
-function randCode(len = 16) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // avoid confusing chars
-  let out = "";
-  for (let i=0; i<len; i++) out += chars[Math.floor(Math.random()*chars.length)];
-  return out;
-}
-
-function isTelegramMockEnabled(env) {
-  const v = env?.MOCK_TELEGRAM;
-  if (v === undefined || v === null) return false;
-  return String(v).toLowerCase() !== "false" && String(v) !== "0";
-}
-
-async function tgCall(env, method, payload) {
-  if (isTelegramMockEnabled(env)) {
-    if (method === "createChatInviteLink") {
-      return { invite_link: `https://t.me/+mock_${payload.chat_id}` };
-    }
-    if (method === "getFile") {
-      return { file_path: "mock/file.jpg" };
-    }
-    return { mock: true };
-  }
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.ok) {
-    const err = new Error(`Telegram API ${method} failed: ${res.status} ${JSON.stringify(json)}`);
-    err.status = res.status;
-    err.tg = json;
-    throw err;
-  }
-  return json.result;
-}
-
-async function ensureUser(env, user) {
-  const t = nowSec();
-  const userId = user?.id;
-  if (!Number.isFinite(userId)) return;
-  const username = user?.username || "";
-  const firstName = user?.first_name || "";
-  const lastName = user?.last_name || "";
-  await getDb(env).prepare(
-    `INSERT INTO users(user_id, can_dm, first_seen_at, last_seen_at, username, first_name, last_name)
-     VALUES (?, 1, ?, ?, ?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at, username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name`
-  ).bind(userId, t, t, username, firstName, lastName).run();
-}
-
-async function setCanDm(env, userId, canDm) {
-  const t = nowSec();
-  await getDb(env).prepare(`UPDATE users SET can_dm=?, last_seen_at=? WHERE user_id=?`).bind(canDm ? 1 : 0, t, userId).run();
-}
-
-async function getMembership(env, userId) {
-  const row = await getDb(env).prepare(`SELECT user_id, verified_at, expire_at FROM memberships WHERE user_id=?`).bind(userId).first();
-  return row || null;
-}
-
-function getVipCacheKey(userId) {
-  return `vip_cache:${userId}`;
-}
-
-function getVipCacheTtl(env, expireAt) {
-  const now = nowSec();
-  if (expireAt && expireAt > now) {
-    return Math.max(60, expireAt - now);
-  }
-  const tz = env.TZ || "Asia/Shanghai";
-  const nextDayStart = getTzDayStart(now + 86400, tz);
-  return Math.max(3600, nextDayStart - now + 3600);
-}
-
-async function setVipCache(env, userId, expireAt) {
-  const kv = getKv(env);
-  if (!kv || !Number.isFinite(userId)) return;
-  if (expireAt && expireAt > nowSec()) {
-    await kv.put(getVipCacheKey(userId), String(expireAt), { expirationTtl: getVipCacheTtl(env, expireAt) });
-  } else {
-    await kv.put(getVipCacheKey(userId), "0", { expirationTtl: getVipCacheTtl(env, null) });
-  }
-}
-
-async function isMember(env, userId) {
-  const kv = getKv(env);
-  const cached = kv ? await kv.get(getVipCacheKey(userId)) : null;
-  if (cached === "0") return false;
-  if (cached) {
-    const exp = Number(cached);
-    if (Number.isFinite(exp)) {
-      if (exp > nowSec()) return true;
-      await setVipCache(env, userId, null);
-      return false;
-    }
-    if (cached === "1") return true;
-  }
-  const m = await getMembership(env, userId);
-  const isActive = !!(m && m.expire_at > nowSec());
-  await setVipCache(env, userId, isActive ? m.expire_at : null);
-  return isActive;
-}
-
-async function addMembershipDays(env, userId, days) {
-  const t = nowSec();
-  const m = await getMembership(env, userId);
-  const base = m ? Math.max(t, m.expire_at) : t;
-  const expire = base + days * 86400;
-  if (m) {
-    await getDb(env).prepare(`UPDATE memberships SET expire_at=?, updated_at=? WHERE user_id=?`).bind(expire, t, userId).run();
-  } else {
-    await getDb(env).prepare(`INSERT INTO memberships(user_id, verified_at, expire_at, updated_at) VALUES (?,?,?,?)`)
-      .bind(userId, t, expire, t).run();
-  }
-  await setVipCache(env, userId, expire);
-  await getDb(env).prepare(`DELETE FROM expired_users WHERE user_id=?`).bind(userId).run();
-  return { wasMember: !!(m && m.expire_at > t), expire_at: expire };
-}
-
-async function getTemplate(env, key) {
-  const row = await getDb(env).prepare(`SELECT key,title,parse_mode,disable_preview,text,buttons_json FROM templates WHERE key=?`).bind(key).first();
-  if (!row) return null;
-  let buttons = [];
-  try {
-    buttons = JSON.parse(row.buttons_json || "[]");
-  } catch {
-    buttons = [];
-  }
-  return {
-    key: row.key,
-    title: row.title,
-    parse_mode: row.parse_mode || "HTML",
-    disable_preview: row.disable_preview ? true : false,
-    text: row.text || "",
-    buttons,
-  };
-}
-
-function buildKeyboard(buttonRows) {
-  // buttonRows: [[{text,type,url,data}], ...]
-  const inline_keyboard = (buttonRows || []).map(row => row.map(btn => {
-    if (btn.type === "url") return { text: btn.text, url: btn.url };
-    if (btn.type === "callback") return { text: btn.text, callback_data: btn.data };
-    // fallback
-    return { text: btn.text || "按钮", callback_data: btn.data || "NOOP" };
-  }));
-  return { inline_keyboard };
-}
-
-function renderTemplateText(text, vars) {
-  let out = text || "";
-  for (const [k,v] of Object.entries(vars || {})) {
-    out = out.replaceAll(`{{${k}}}`, String(v));
-  }
-  return out;
-}
-
-function renderButtonsWithVars(buttons, vars) {
-  if (!Array.isArray(buttons)) return [];
-  return buttons.map(row => {
-    if (!Array.isArray(row)) return [];
-    return row.map(btn => {
-      const text = renderTemplateText(btn.text || "", vars);
-      if (btn.type === "callback") {
-        return { text, type: "callback", data: renderTemplateText(btn.data || "", vars) };
-      }
-      return { text, type: "url", url: renderTemplateText(btn.url || "", vars) };
-    });
-  }).filter(row => row.length);
-}
-
-function escapeHtmlText(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-async function getSetting(env, key, fallback = "") {
-  const row = await getDb(env).prepare(`SELECT value FROM settings WHERE key=?`).bind(key).first();
-  if (row && typeof row.value === "string") return row.value;
-  return fallback;
-}
-
-async function setSetting(env, key, value) {
-  const t = nowSec();
-  await getDb(env).prepare(
-    `INSERT INTO settings(key,value,updated_at)
-     VALUES (?,?,?)
-     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
-  ).bind(key, value, t).run();
-}
-
-function normalizeBaseUrl(url) {
-  return String(url || "").trim().replace(/\/+$/, "");
-}
-
-let proxySigningKeyPromise;
-
-async function getProxySigningKey(env) {
-  if (proxySigningKeyPromise) return proxySigningKeyPromise;
-  const secret = env.TG_PROXY_SECRET || env.BOT_TOKEN;
-  const encoder = new TextEncoder();
-  proxySigningKeyPromise = crypto.subtle.importKey(
-    "raw",
-    encoder.encode(String(secret || "")),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"]
-  );
-  return proxySigningKeyPromise;
-}
-
-function toBase64Url(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-async function signProxyPayload(env, payload) {
-  const key = await getProxySigningKey(env);
-  const encoder = new TextEncoder();
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return toBase64Url(signature);
-}
-
-async function buildSignedProxyUrl(env, origin, fileId, userId) {
-  const exp = nowSec() + IMAGE_PROXY_TTL_SEC;
-  const uid = String(userId || "");
-  const payload = `${fileId}|${exp}|${uid}`;
-  const sig = await signProxyPayload(env, payload);
-  const safeFileId = encodeURIComponent(fileId);
-  const base = normalizeBaseUrl(origin || env.PUBLIC_BASE_URL || "");
-  return `${base}${IMAGE_PROXY_PREFIX}${safeFileId}?exp=${exp}&uid=${encodeURIComponent(uid)}&sig=${sig}`;
-}
-
-async function getTelegramFilePath(env, fileId, fileUniqueId) {
-  const kv = getKv(env);
-  const fileKey = `tg:file:${fileId}`;
-  let filePath = await kv.get(fileKey);
-  if (!filePath && fileUniqueId) {
-    filePath = await kv.get(`tg:unique:${fileUniqueId}`);
-  }
-  if (!filePath) {
-    const file = await tgCall(env, "getFile", { file_id: fileId });
-    if (!file?.file_path) throw new Error("No file path");
-    filePath = file.file_path;
-  }
-  if (filePath) {
-    await kv.put(fileKey, filePath, { expirationTtl: FILE_PATH_CACHE_TTL });
-    if (fileUniqueId) {
-      await kv.put(`tg:unique:${fileUniqueId}`, filePath, { expirationTtl: FILE_PATH_CACHE_TTL });
-    }
-  }
-  return filePath;
-}
-
-async function bumpRateLimit(env, key, limit, ttlSec) {
-  const kv = getKv(env);
-  const current = Number(await kv.get(key) || 0);
-  if (current >= limit) return false;
-  await kv.put(key, String(current + 1), { expirationTtl: ttlSec });
-  return true;
-}
-
-function buildImageSearchLinks(url) {
-  const encoded = encodeURIComponent(url);
-  return {
-    google: `https://lens.google.com/uploadbyurl?url=${encoded}`,
-    yandex: `https://yandex.ru/images/search?rpt=imageview&url=${encoded}`
-  };
-}
-
-function buildUserDisplay(row) {
-  const username = row?.username || "";
-  const fullName = [row?.first_name, row?.last_name].filter(Boolean).join(" ");
-  const displayName = username ? `@${username}` : (fullName || String(row?.user_id || ""));
-  const profileLink = username ? `https://t.me/${username}` : `tg://user?id=${row?.user_id}`;
-  return { displayName, profileLink };
-}
-
-function buildUserStatusLabel(row, now) {
-  if (row.can_dm === 0) return "退订";
-  const idleSeconds = now - (row.last_seen_at || 0);
-  return idleSeconds <= 7 * 86400 ? "活跃" : "潜水";
-}
-
-async function sendTemplate(env, chatId, templateKey, extra = {}) {
-  const tpl = await getTemplate(env, templateKey);
-  if (!tpl) throw new Error(`Template not found: ${templateKey}`);
-  const text = renderTemplateText(tpl.text, extra.vars || {});
-  const buttons = extra.buttonsOverride ?? tpl.buttons;
-  const payload = {
-    chat_id: chatId,
-    text,
-    parse_mode: tpl.parse_mode,
-    disable_web_page_preview: tpl.disable_preview,
-  };
-  if (buttons && buttons.length) payload.reply_markup = buildKeyboard(buttons);
-  return tgCall(env, "sendMessage", payload);
-}
-
-async function trySendMessage(env, chatId, payload) {
-  try {
-    return await tgCall(env, "sendMessage", payload);
-  } catch (e) {
-    // 403: bot was blocked or can't message user
-    if (String(e.tg?.error_code) === "403" || e.status === 403) {
-      await setCanDm(env, chatId, false);
-    }
-    throw e;
-  }
-}
-
-/** Fixed buttons for /start */
-function appendFixedStartButtons(buttonsFromTpl) {
-  const rows = Array.isArray(buttonsFromTpl) ? buttonsFromTpl.slice() : [];
-  // Ensure it's 2D
-  const norm = rows.map(r => Array.isArray(r) ? r : []);
-  norm.push([{ text: "验证卡密", type: "callback", data: "VERIFY" }]);
-  norm.push([{ text: "人工客服", type: "callback", data: "SUPPORT" }]);
-  return norm;
-}
-
-/** Generate join-request links for all enabled managed chats */
-async function getJoinLinks(env) {
-  const chats = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1`).all();
-  return chats.results || [];
-}
-
-async function ensureJoinRequestLink(env, chatId) {
-  // Create a join-request invite link that is long-lived. Telegram may return existing links but we'll just create a new one and store it in KV cache.
-  const cacheKey = `joinlink:${chatId}`;
-  const cached = await getKv(env).get(cacheKey);
-  if (cached) return cached;
-
-  // createChatInviteLink supports creates_join_request for groups/channels that require approval.
-  // Note: For best results, also set the chat to require join request in Telegram settings.
-  const res = await tgCall(env, "createChatInviteLink", {
-    chat_id: chatId,
-    creates_join_request: true,
-    name: "VIP申请入口",
-  });
-  const link = res.invite_link;
-  await getKv(env).put(cacheKey, link);
-  return link;
-}
-
-/** Build "Apply to join" button list for all managed chats */
-async function buildApplyButtons(env) {
-  const chats = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1`).all();
-  return buildApplyButtonsFromChats(env, chats.results || []);
-}
-
-async function buildApplyButtonsFromChats(env, chats) {
-  const rows = [];
-  for (const c of chats) {
-    const link = await ensureJoinRequestLink(env, c.chat_id);
-    rows.push([{ text: c.title ? `申请加入：${c.title}` : `申请加入 ${c.chat_id}`, type: "url", url: link }]);
-  }
-  return rows;
-}
-
-async function buildApplyButtonsForChat(env, chatId) {
-  const chat = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1 AND chat_id=?`).bind(chatId).first();
-  if (!chat) return null;
-  return buildApplyButtonsFromChats(env, [chat]);
-}
-
-/** Mark that user is waiting to send a code */
-async function setAwaitingCode(env, userId, on) {
-  const key = `await_code:${userId}`;
-  const retryKey = `await_code_retry:${userId}`;
-  if (on) {
-    await getKv(env).put(key, "1", { expirationTtl: 600 }); // 10 min
-    await getKv(env).delete(retryKey);
-  } else {
-    await getKv(env).delete(key);
-    await getKv(env).delete(retryKey);
-  }
-}
-async function isAwaitingCode(env, userId) {
-  const key = `await_code:${userId}`;
-  return (await getKv(env).get(key)) === "1";
-}
-async function getAwaitingCodeRetry(env, userId) {
-  const key = `await_code_retry:${userId}`;
-  return Number(await getKv(env).get(key) || 0);
-}
-async function bumpAwaitingCodeRetry(env, userId) {
-  const key = `await_code_retry:${userId}`;
-  const next = (await getAwaitingCodeRetry(env, userId)) + 1;
-  await getKv(env).put(key, String(next), { expirationTtl: 600 });
-  return next;
-}
-
-function normalizeCardCode(text) {
-  return String(text || "")
-    .toUpperCase();
-}
-
-function isLikelyCardCode(text) {
-  const normalized = normalizeCardCode(text);
-  if (!normalized) return false;
-  if (normalized.length !== CARD_CODE_LENGTH) return false;
-  return /^[A-Z0-9]{18}$/.test(normalized);
-}
-
-function extractCardCode(text) {
-  if (!text) return null;
-  const normalized = normalizeCardCode(text);
-  const match = normalized.match(/[A-Z0-9]{18}/);
-  return match ? match[0] : null;
-}
-
-async function redeemCardCode(env, userId, code) {
-  const t = nowSec();
-  const normalized = normalizeCardCode(code);
-  const db = getDb(env);
-
-  let codeRow;
-  let previous;
-  let wasMember = false;
-  let newExpire = null;
-
-  try {
-    codeRow = await db
-      .prepare(`SELECT code, days, status FROM codes WHERE code = ?`)
-      .bind(normalized)
-      .first();
-
-    if (!codeRow) {
-      return { ok: false, reason: "invalid" };
-    }
-
-    if (codeRow.status !== "unused") {
-      if (codeRow.status === "used") {
-        return { ok: false, reason: "used" };
-      }
-      return { ok: false, reason: "invalid" };
-    }
-
-    const claimed = await db
-      .prepare(`UPDATE codes SET status='used', used_by=?, used_at=? WHERE code=? AND status='unused'`)
-      .bind(userId, t, normalized)
-      .run();
-
-    if (!claimed || claimed.success !== true || claimed.meta?.changes !== 1) {
-      return { ok: false, reason: "used" };
-    }
-
-    previous = await db
-      .prepare(`SELECT user_id, verified_at, expire_at FROM memberships WHERE user_id=?`)
-      .bind(userId)
-      .first();
-    wasMember = !!(previous && previous.expire_at > t);
-    const baseExpire = wasMember ? previous.expire_at : t;
-    newExpire = baseExpire + codeRow.days * 86400;
-
-    try {
-      if (previous) {
-        await db.prepare(`UPDATE memberships SET expire_at=?, updated_at=? WHERE user_id=?`).bind(newExpire, t, userId).run();
-      } else {
-        await db.prepare(`INSERT INTO memberships(user_id, verified_at, expire_at, updated_at) VALUES (?,?,?,?)`)
-          .bind(userId, t, newExpire, t).run();
-      }
-    } catch (membershipErr) {
-      await db.prepare(
-        `UPDATE codes SET status='unused', used_by=NULL, used_at=NULL WHERE code=? AND used_by=? AND used_at=?`
-      ).bind(normalized, userId, t).run();
-      throw membershipErr;
-    }
-  } catch (e) {
-    console.error("D1 error", e);
-    return { ok: false, reason: "db_unavailable" };
-  }
-
-  await setVipCache(env, userId, newExpire);
-  await db.prepare(`DELETE FROM expired_users WHERE user_id=?`).bind(userId).run();
-
-  const applyButtons = await buildApplyButtons(env);
-
-  return {
-    ok: true,
-    days: codeRow.days,
-    code: codeRow.code,
-    wasMember,
-    expire_at: newExpire,
-    applyButtons,
-  };
-}
-
-async function handleCardRedeem(env, userId, code) {
-  try {
-    const result = await redeemCardCode(env, userId, code);
-    if (!result.ok) {
-      if (result.reason === "db_unavailable") {
-        await setAwaitingCode(env, userId, false);
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "数据库连接异常，请稍后重试或联系客服处理。" });
-        return false;
-      }
-      if (result.reason === "used") {
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！此卡密已被使用。" });
-        return false;
-      }
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
-      return false;
-    }
-    const tplKey = result.wasMember ? "vip_renew" : "vip_new";
-    const tpl = await getTemplate(env, tplKey);
-    const fallbackText = result.wasMember
-      ? "尊贵的VIP用户，您的会员时长已叠加！可点击下方按钮申请加入打赏群/频道！"
-      : "您已成为尊贵的VIP用户，可点击下方按钮申请加入打赏群/频道！";
-    const msgText = renderTemplateText(tpl?.text || fallbackText, { expire_at: fmtDateTime(result.expire_at, env.TZ) });
-    await setAwaitingCode(env, userId, false);
-    await trySendMessage(env, userId, {
-      chat_id: userId,
-      text: msgText,
-      parse_mode: tpl?.parse_mode || "HTML",
-      disable_web_page_preview: tpl ? tpl.disable_preview : false,
-      reply_markup: buildKeyboard(result.applyButtons),
-    });
-    return true;
-  } catch {
-    await setAwaitingCode(env, userId, false);
-    await tgCall(env, "sendMessage", { chat_id: userId, text: "数据库连接异常，请稍后重试或联系客服处理。" });
-    return false;
-  }
-}
-
-async function ensureBotCommands(env) {
-  const key = "bot_commands_set";
-  const kv = getKv(env);
-  if (await kv.get(key)) return;
-  try {
-    await tgCall(env, "setMyCommands", {
-      commands: [{ command: "start", description: "开始 - 打开首页" }],
-      scope: { type: "all_private_chats" }
-    });
-    await kv.put(key, "1", { expirationTtl: 86400 });
-  } catch {
-    // ignore
-  }
-}
-
-async function checkDailyDmLimit(env, userId, isAdmin) {
-  if (isAdmin) return { allowed: true, remaining: null };
-  const member = await isMember(env, userId);
-  const limit = member ? 100 : 10;
-  const dayKey = getTzDateKey(nowSec(), env.TZ);
-  const key = `dm_count:${dayKey}:${userId}`;
-  const current = Number(await getKv(env).get(key) || 0);
-  if (current >= limit) return { allowed: false, remaining: 0, limit };
-  await getKv(env).put(key, String(current + 1), { expirationTtl: 2 * 86400 });
-  return { allowed: true, remaining: limit - current - 1, limit };
-}
-
-async function checkDailyImageLimit(env, userId) {
-  const member = await isMember(env, userId);
-  const limit = member ? IMAGE_DAILY_LIMIT_MEMBER : IMAGE_DAILY_LIMIT_NON_MEMBER;
-  const dayKey = getTzDateKey(nowSec(), env.TZ);
-  const key = `image_count:${dayKey}:${userId}`;
-  const current = Number(await getKv(env).get(key) || 0);
-  if (current >= limit) return { allowed: false, current, limit, member };
-  await getKv(env).put(key, String(current + 1), { expirationTtl: 2 * 86400 });
-  return { allowed: true, current: current + 1, limit, member };
-}
-
-async function shouldNotifyImageLimit(env, userId, tier) {
-  const dayKey = getTzDateKey(nowSec(), env.TZ);
-  const key = `image_limit_notified:${dayKey}:${userId}:${tier}`;
-  const notified = await getKv(env).get(key);
-  if (notified) return false;
-  await getKv(env).put(key, "1", { expirationTtl: 2 * 86400 });
-  return true;
-}
-
-async function shouldNotifyVideoWarning(env, userId) {
-  const dayKey = getTzDateKey(nowSec(), env.TZ);
-  const key = `video_warn:${dayKey}:${userId}`;
-  const warned = await getKv(env).get(key);
-  if (warned) return false;
-  await getKv(env).put(key, "1", { expirationTtl: 2 * 86400 });
-  return true;
-}
-
-async function hasVideoWarning(env, userId) {
-  const dayKey = getTzDateKey(nowSec(), env.TZ);
-  const key = `video_warn:${dayKey}:${userId}`;
-  return !!(await getKv(env).get(key));
-}
-
-async function shouldNotifyMediaGroup(env, groupId) {
-  if (!groupId) return true;
-  const key = `media_group_warn:${groupId}`;
-  const kv = getKv(env);
-  const warned = await kv.get(key);
-  if (warned) return false;
-  await kv.put(key, "1", { expirationTtl: 120 });
-  return true;
-}
+import {
+  IMAGE_LIMIT_MEMBER_TEMPLATE_KEY,
+  IMAGE_LIMIT_NONMEMBER_TEMPLATE_KEY,
+  IMAGE_REPLY_DEFAULT_BUTTONS,
+  IMAGE_REPLY_DEFAULT_TEXT,
+  IMAGE_REPLY_TEMPLATE_KEY,
+  SUPPORT_CLOSED_TEMPLATE_KEY,
+  SUPPORT_SPAM_BAN_TTL_SEC,
+  TEMPLATE_SORT_ORDER,
+  JSON_HEADERS,
+} from "./config.js";
+import { ensureUser, getDb, getTemplate } from "./db.js";
+import { getKv } from "./kv.js";
+import { isMember } from "./auth.js";
+import {
+  extractCardCode,
+  handleCardRedeem,
+  isAwaitingCode,
+  isLikelyCardCode,
+  setAwaitingCode,
+} from "./card.js";
+import {
+  buildImageSearchLinks,
+  buildSignedProxyUrl,
+  checkDailyImageLimit,
+  getTelegramFilePath,
+  hasVideoWarning,
+  shouldNotifyImageLimit,
+  shouldNotifyMediaGroup,
+  shouldNotifyVideoWarning,
+} from "./image.js";
+import { ensureBotCommands, sendTemplate, tgCall, trySendMessage } from "./telegram.js";
+import {
+  appendFixedStartButtons,
+  buildKeyboard,
+  buildUserDisplay,
+  buildUserStatusLabel,
+  fmtDateTime,
+  getMessageImageInfo,
+  getTzDateKey,
+  getTzDayStart,
+  getTzWeekStart,
+  hasImageContent,
+  isPrivateChat,
+  isVideoMessage,
+  nowSec,
+  parseAdminIds,
+  randCode,
+  renderButtonsWithVars,
+  renderTemplateText,
+} from "./utils.js";
 
 /** Support session helpers */
-async function openSupport(env, userId) {
+export async function openSupport(env, userId) {
   const t = nowSec();
   await getDb(env).prepare(
     `INSERT INTO support_sessions(user_id,is_open,updated_at) VALUES (?,?,?)
@@ -805,7 +59,8 @@ async function openSupport(env, userId) {
   ).bind(userId, 1, t).run();
   await getKv(env).put(`support_open:${userId}`, String(t + 600), { expirationTtl: 600 });
 }
-async function closeSupport(env, userId) {
+
+export async function closeSupport(env, userId) {
   const t = nowSec();
   await getDb(env).prepare(
     `INSERT INTO support_sessions(user_id,is_open,updated_at) VALUES (?,?,?)
@@ -813,7 +68,8 @@ async function closeSupport(env, userId) {
   ).bind(userId, 0, t).run();
   await getKv(env).delete(`support_open:${userId}`);
 }
-async function isSupportOpen(env, userId) {
+
+export async function isSupportOpen(env, userId) {
   const kvVal = await getKv(env).get(`support_open:${userId}`);
   if (kvVal) return true;
   const row = await getDb(env).prepare(`SELECT is_open FROM support_sessions WHERE user_id=?`).bind(userId).first();
@@ -821,12 +77,12 @@ async function isSupportOpen(env, userId) {
   return false;
 }
 
-async function isSupportBlocked(env, userId) {
+export async function isSupportBlocked(env, userId) {
   const row = await getDb(env).prepare(`SELECT support_blocked FROM users WHERE user_id=?`).bind(userId).first();
   return row && row.support_blocked === 1;
 }
 
-async function isSupportTempBanned(env, userId) {
+export async function isSupportTempBanned(env, userId) {
   const key = `support_ban:${userId}`;
   const bannedUntil = await getKv(env).get(key);
   if (!bannedUntil) return false;
@@ -835,18 +91,18 @@ async function isSupportTempBanned(env, userId) {
   return false;
 }
 
-async function setSupportTempBanned(env, userId, ttlSec) {
+export async function setSupportTempBanned(env, userId, ttlSec) {
   const until = nowSec() + ttlSec;
   await getKv(env).put(`support_ban:${userId}`, String(until), { expirationTtl: ttlSec });
   await closeSupport(env, userId);
 }
 
-async function setSupportBlocked(env, userId, blocked) {
+export async function setSupportBlocked(env, userId, blocked) {
   await getDb(env).prepare(`UPDATE users SET support_blocked=? WHERE user_id=?`).bind(blocked ? 1 : 0, userId).run();
   if (blocked) await closeSupport(env, userId);
 }
 
-async function checkSpamAndMaybeClose(env, userId) {
+export async function checkSpamAndMaybeClose(env, userId) {
   const key = `support_spam:${userId}`;
   const t = Date.now();
   const raw = await getKv(env).get(key);
@@ -872,34 +128,8 @@ async function checkSpamAndMaybeClose(env, userId) {
   return { muted: false, closedNow: false };
 }
 
-function isPrivateChat(msg) { return msg?.chat?.type === "private"; }
-function isVideoMessage(msg) {
-  if (msg?.video || msg?.animation) return true;
-  const doc = msg?.document;
-  return !!(doc?.mime_type && doc.mime_type.startsWith("video/"));
-}
-function hasImageContent(msg) {
-  if (Array.isArray(msg?.photo) && msg.photo.length) return true;
-  const doc = msg?.document;
-  return !!(doc?.mime_type && doc.mime_type.startsWith("image/"));
-}
-function getMessageImageInfo(msg) {
-  const photos = msg?.photo || [];
-  if (photos.length) {
-    const last = photos[photos.length - 1];
-    if (!last?.file_id) return null;
-    return { fileId: last.file_id, fileUniqueId: last.file_unique_id || "" };
-  }
-  const doc = msg?.document;
-  if (doc?.mime_type && doc.mime_type.startsWith("image/")) {
-    if (!doc.file_id) return null;
-    return { fileId: doc.file_id, fileUniqueId: doc.file_unique_id || "" };
-  }
-  return null;
-}
-
 /** Admin login: /login in bot DM generates a one-time link */
-async function handleAdminLoginCommand(env, msg, origin) {
+export async function handleAdminLoginCommand(env, msg, origin) {
   const adminIds = parseAdminIds(env);
   const fromId = msg.from?.id;
   if (!adminIds.includes(fromId)) {
@@ -917,7 +147,7 @@ async function handleAdminLoginCommand(env, msg, origin) {
   });
 }
 
-async function isAdminSession(env, req) {
+export async function isAdminSession(env, req) {
   const cookie = req.headers.get("cookie") || "";
   const m = cookie.match(/admin_session=([A-Za-z0-9_-]+)/);
   if (!m) return null;
@@ -926,8 +156,7 @@ async function isAdminSession(env, req) {
   if (!v) return null;
   return Number(v);
 }
-
-function adminHtml() {
+export function adminHtml() {
   // IMPORTANT: Do not use nested JS template literals inside this HTML, or it will break the Worker source.
   // This version avoids backticks in the embedded <script>.
   return `<!doctype html>
@@ -2240,7 +1469,7 @@ function adminHtml() {
 </html>`;
 }
 
-function wallpaperHtml() {
+export function wallpaperHtml() {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2293,13 +1522,13 @@ function wallpaperHtml() {
 </html>`;
 }
 
-async function createAdminSession(env, userId) {
+export async function createAdminSession(env, userId) {
   const token = crypto.randomUUID().replaceAll("-", "");
   await getKv(env).put(`admin_session:${token}`, String(userId), { expirationTtl: 7 * 24 * 3600 });
   return token;
 }
 
-async function consumeAdminLoginToken(env, token) {
+export async function consumeAdminLoginToken(env, token) {
   if (!token) return null;
   const uidStr = await getKv(env).get(`admin_login_token:${token}`);
   if (!uidStr) return null;
@@ -2310,424 +1539,7 @@ async function consumeAdminLoginToken(env, token) {
   return userId;
 }
 
-async function handleBingImagesRequest() {
-  try {
-    const res = await fetch("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8");
-    if (!res.ok) throw new Error("bing failed");
-    const data = await res.json();
-    const images = (data.images || []).map(img => {
-      const url = img.url || "";
-      if (url.startsWith("http")) return url;
-      return `https://www.bing.com${url}`;
-    }).filter(Boolean);
-    return new Response(JSON.stringify({ ok: true, data: images.map(url => ({ url })) }), { headers: JSON_HEADERS });
-  } catch {
-    return new Response(JSON.stringify({ ok: false, data: [] }), { headers: JSON_HEADERS });
-  }
-}
-
-async function handleWebhook(env, update, origin) {
-  // Track users who DM the bot
-  const msg = update.message;
-  const cbq = update.callback_query;
-  const joinReq = update.chat_join_request;
-  const chatMember = update.chat_member;
-  const myChatMember = update.my_chat_member;
-
-  if (msg && msg.from?.id) await ensureUser(env, msg.from);
-
-  if (myChatMember) {
-    const chat = myChatMember.chat;
-    const newStatus = myChatMember.new_chat_member?.status;
-    const inviterId = myChatMember.from?.id;
-    const adminIds = parseAdminIds(env);
-    const botAdded = ["member", "administrator"].includes(newStatus);
-    if (botAdded && chat?.id && !adminIds.includes(inviterId)) {
-      try {
-        await tgCall(env, "leaveChat", { chat_id: chat.id });
-      } catch {
-        // ignore
-      }
-      return;
-    }
-  }
-
-  if (msg?.new_chat_members?.length) {
-    const botInfo = msg.new_chat_members.find(member => member?.is_bot);
-    if (botInfo && msg.chat?.id) {
-      const adminIds = parseAdminIds(env);
-      const inviterId = msg.from?.id;
-      if (!adminIds.includes(inviterId)) {
-        try {
-          await tgCall(env, "leaveChat", { chat_id: msg.chat.id });
-        } catch {
-          // ignore
-        }
-        return;
-      }
-    }
-  }
-
-    // Enforce membership on chat member changes (new joins after bot added)
-  if (chatMember) {
-    const chatId = chatMember.chat?.id;
-    const memberUser = chatMember.new_chat_member?.user;
-    const status = chatMember.new_chat_member?.status;
-    if (chatId && memberUser && !memberUser.is_bot) {
-      const managed = await getDb(env).prepare(`SELECT chat_id FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
-      if (managed && (status === "member" || status === "restricted")) {
-        const memberOk = await isMember(env, memberUser.id);
-        if (!memberOk) {
-          const t = nowSec();
-          try {
-            await tgCall(env, "banChatMember", { chat_id: chatId, user_id: memberUser.id, until_date: t + 30 });
-            await tgCall(env, "unbanChatMember", { chat_id: chatId, user_id: memberUser.id, only_if_banned: true });
-            await getDb(env).prepare(`UPDATE user_chats SET removed_at=? WHERE user_id=? AND chat_id=?`).bind(t, memberUser.id, chatId).run();
-          } catch {
-            // ignore permission errors
-          }
-        }
-      }
-    }
-  }
-
-  // Join request handling (for managed chats only)
-  if (joinReq) {
-    const chatId = joinReq.chat?.id;
-    const userId = joinReq.from?.id;
-    const managed = await getDb(env).prepare(`SELECT chat_id FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
-    if (!managed) return;
-
-    const memberOk = await isMember(env, userId);
-    if (memberOk) {
-      await tgCall(env, "approveChatJoinRequest", { chat_id: chatId, user_id: userId });
-      await getDb(env).prepare(
-        `INSERT INTO user_chats(user_id,chat_id,approved_at,removed_at) VALUES (?,?,?,NULL)
-         ON CONFLICT(user_id,chat_id) DO UPDATE SET approved_at=excluded.approved_at, removed_at=NULL`
-      ).bind(userId, chatId, nowSec()).run();
-    } else {
-      await tgCall(env, "declineChatJoinRequest", { chat_id: chatId, user_id: userId });
-      // If we can DM, send "denied" template
-      const u = await getDb(env).prepare(`SELECT can_dm FROM users WHERE user_id=?`).bind(userId).first();
-      if (u && u.can_dm === 1) {
-        try {
-          const tpl = await getTemplate(env, "join_denied");
-          if (tpl) {
-            await sendTemplate(env, userId, "join_denied");
-          } else {
-            await tgCall(env, "sendMessage", { chat_id: userId, text: "您当前不是VIP用户或会员已到期，请发送卡密验证。" });
-          }
-        } catch (e) {
-          // ignore
-        }
-      }
-    }
-    return;
-  }
-
-  // Callback query buttons
-  if (cbq) {
-    const userId = cbq.from?.id;
-    const chatId = cbq.message?.chat?.id;
-    const data = cbq.data || "";
-
-    // Always answer callback to avoid "loading"
-    try { await tgCall(env, "answerCallbackQuery", { callback_query_id: cbq.id }); } catch {}
-
-    if (!isPrivateChat(cbq.message)) return;
-
-    if (data === "VERIFY") {
-      if (await isSupportOpen(env, userId)) {
-        await closeSupport(env, userId);
-      }
-      await setAwaitingCode(env, userId, true);
-      try {
-        const tpl = await getTemplate(env, "ask_code");
-        if (tpl) {
-          await sendTemplate(env, chatId, "ask_code");
-        } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
-        }
-      } catch {
-        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
-      }
-      return;
-    }
-    if (data === "SUPPORT") {
-      if (await isSupportBlocked(env, userId)) {
-        await tgCall(env, "sendMessage", { chat_id: chatId, text: "你已被管理员屏蔽使用人工客服，请稍后再试。" });
-        return;
-      }
-      if (await isSupportTempBanned(env, userId)) {
-        const spamTpl = await getTemplate(env, "support_closed_spam");
-        if (spamTpl) {
-          await sendTemplate(env, chatId, "support_closed_spam");
-        } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
-        }
-        return;
-      }
-      if (await isSupportOpen(env, userId)) {
-        await closeSupport(env, userId);
-        const tpl = await getTemplate(env, SUPPORT_CLOSED_TEMPLATE_KEY);
-        if (tpl) {
-          await sendTemplate(env, chatId, SUPPORT_CLOSED_TEMPLATE_KEY);
-        } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭！" });
-        }
-        return;
-      }
-      await setAwaitingCode(env, userId, false);
-      await openSupport(env, userId);
-      await sendTemplate(env, chatId, "support_open");
-      return;
-    }
-    return;
-  }
-
-  // Messages
-  if (!msg) return;
-  if (!isPrivateChat(msg)) return;
-
-  const userId = msg.from?.id;
-  const text = msg.text || msg.caption || "";
-  const t = nowSec();
-  const adminIds = parseAdminIds(env);
-  const isAdmin = adminIds.includes(userId);
-
-  // Admin commands in private chat
-  if (text.startsWith("/login")) {
-    await handleAdminLoginCommand(env, msg, origin);
-    return;
-  }
-
-  // Admin reply command: /reply <user_id> <text>
-  if (isAdmin && text.startsWith("/reply")) {
-    const m = text.match(/^\/reply\s+(\d+)\s+([\s\S]+)$/);
-    if (m) {
-      const target = Number(m[1]);
-      const body = m[2];
-      try {
-        await trySendMessage(env, target, { chat_id: target, text: body });
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "已发送。"});
-      } catch (e) {
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "发送失败：" + (e.tg?.description || e.message) });
-      }
-    } else {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/reply 用户ID 内容" });
-    }
-    return;
-  }
-
-  // Admin support block commands: /block <user_id> or /unblock <user_id>
-  if (isAdmin && (text.startsWith("/block") || text.startsWith("/support_block"))) {
-    const m = text.match(/^\/(?:block|support_block)\s+(\d+)$/);
-    if (!m) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/block 用户ID" });
-      return;
-    }
-    const target = Number(m[1]);
-    await setSupportBlocked(env, target, true);
-    await tgCall(env, "sendMessage", { chat_id: userId, text: "已屏蔽该用户使用人工客服。" });
-    return;
-  }
-  if (isAdmin && (text.startsWith("/unblock") || text.startsWith("/support_unblock"))) {
-    const m = text.match(/^\/(?:unblock|support_unblock)\s+(\d+)$/);
-    if (!m) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/unblock 用户ID" });
-      return;
-    }
-    const target = Number(m[1]);
-    await setSupportBlocked(env, target, false);
-    await tgCall(env, "sendMessage", { chat_id: userId, text: "已解除该用户客服屏蔽。" });
-    return;
-  }
-
-  // Support session forwarding (higher priority than other replies)
-  if (await isSupportOpen(env, userId)) {
-    if (await isSupportBlocked(env, userId)) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "你已被管理员屏蔽使用人工客服。" });
-      return;
-    }
-    if (await isSupportTempBanned(env, userId)) {
-      const spamTpl = await getTemplate(env, "support_closed_spam");
-      if (spamTpl) {
-        await sendTemplate(env, userId, "support_closed_spam");
-      } else {
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
-      }
-      return;
-    }
-    const spam = await checkSpamAndMaybeClose(env, userId);
-    if (spam.closedNow) {
-      await sendTemplate(env, userId, "support_closed_spam");
-      return;
-    }
-    if (spam.muted) return;
-
-    const trimmed = text.trim();
-    const code = extractCardCode(text);
-    const isCardCode = code && isLikelyCardCode(code);
-    const isCommand = trimmed.startsWith("/");
-
-    if (!isCommand) {
-      const adminIds2 = parseAdminIds(env);
-      for (const adminId of adminIds2) {
-        await tgCall(env, "forwardMessage", {
-          chat_id: adminId,
-          from_chat_id: userId,
-          message_id: msg.message_id
-        });
-      }
-    }
-
-    if (isCardCode) {
-      await handleCardRedeem(env, userId, code);
-      return;
-    }
-
-    if (isCommand) return;
-    await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
-    return;
-  }
-
-  if (text.startsWith("/start")) {
-    await ensureBotCommands(env);
-    const tpl = await getTemplate(env, "start");
-    if (!tpl) throw new Error("Missing template: start");
-    const buttons = appendFixedStartButtons(tpl.buttons);
-    await trySendMessage(env, userId, {
-      chat_id: userId,
-      text: tpl.text,
-      parse_mode: tpl.parse_mode,
-      disable_web_page_preview: tpl.disable_preview,
-      reply_markup: buildKeyboard(buttons),
-    });
-    return;
-  }
-
-  if (msg.media_group_id && hasImageContent(msg)) {
-    if (await shouldNotifyMediaGroup(env, msg.media_group_id)) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片哦～" });
-    }
-    return;
-  }
-
-  if (isVideoMessage(msg)) {
-    if (await shouldNotifyVideoWarning(env, userId)) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "本机器人只支持图片搜索哦～" });
-    }
-    return;
-  }
-
-  if (await hasVideoWarning(env, userId)) {
-    return;
-  }
-
-  const imageInfo = getMessageImageInfo(msg);
-  if (imageInfo) {
-    const limitCheck = await checkDailyImageLimit(env, userId);
-    if (!limitCheck.allowed) {
-      const tierKey = limitCheck.member ? "member" : "nonmember";
-      if (await shouldNotifyImageLimit(env, userId, tierKey)) {
-        const templateKey = limitCheck.member ? IMAGE_LIMIT_MEMBER_TEMPLATE_KEY : IMAGE_LIMIT_NONMEMBER_TEMPLATE_KEY;
-        const limitTpl = await getTemplate(env, templateKey) || await getTemplate(env, "image_limit");
-        if (limitTpl) {
-          await sendTemplate(env, userId, limitTpl.key);
-        } else if (limitCheck.member) {
-          await tgCall(env, "sendMessage", { chat_id: userId, text: "谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试哦～" });
-        } else {
-          await tgCall(env, "sendMessage", { chat_id: userId, text: "普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～" });
-        }
-      }
-      return;
-    }
-    try {
-      await getTelegramFilePath(env, imageInfo.fileId, imageInfo.fileUniqueId);
-      const imageUrl = await buildSignedProxyUrl(env, origin, imageInfo.fileId, userId);
-      const links = buildImageSearchLinks(imageUrl);
-      const tpl = await getTemplate(env, IMAGE_REPLY_TEMPLATE_KEY);
-      const replyText = renderTemplateText(tpl?.text || IMAGE_REPLY_DEFAULT_TEXT, {
-        image_url: imageUrl,
-        google_lens: links.google,
-        yandex: links.yandex
-      });
-      const replyButtons = renderButtonsWithVars(tpl?.buttons || IMAGE_REPLY_DEFAULT_BUTTONS, {
-        image_url: imageUrl,
-        google_lens: links.google,
-        yandex: links.yandex
-      });
-      await trySendMessage(env, userId, {
-        chat_id: userId,
-        text: replyText,
-        parse_mode: tpl?.parse_mode || "HTML",
-        disable_web_page_preview: tpl ? tpl.disable_preview : true,
-        reply_markup: replyButtons.length ? buildKeyboard(replyButtons) : undefined
-      });
-    } catch (e) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "图片处理失败，请稍后再试。" });
-    }
-    return;
-  }
-
-  const awaitingCode = await isAwaitingCode(env, userId);
-  if (awaitingCode) {
-    if (text) {
-      const code = extractCardCode(text);
-      if (!code || !isLikelyCardCode(code)) {
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
-        return;
-      }
-      await handleCardRedeem(env, userId, code);
-      return;
-    }
-  }
-
-  // Ignore other messages
-}
-
-function getClientIp(req) {
-  const cf = req.headers.get("cf-connecting-ip");
-  if (cf) return cf;
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return "unknown";
-}
-
-async function handleImageProxyRequest(env, req, url) {
-  const fileId = decodeURIComponent(url.pathname.slice(IMAGE_PROXY_PREFIX.length));
-  if (!fileId) return new Response("Not Found", { status: 404 });
-  const exp = Number(url.searchParams.get("exp") || 0);
-  const uid = url.searchParams.get("uid") || "";
-  const sig = url.searchParams.get("sig") || "";
-  if (!exp || !sig) return new Response("Forbidden", { status: 403 });
-  if (exp < nowSec()) return new Response("Expired", { status: 403 });
-  const payload = `${fileId}|${exp}|${uid}`;
-  const expected = await signProxyPayload(env, payload);
-  if (sig !== expected) return new Response("Forbidden", { status: 403 });
-
-  const bucket = Math.floor(nowSec() / IMAGE_PROXY_RATE_WINDOW);
-  const userKey = `rate:uid:${uid || "anon"}:${bucket}`;
-  const ipKey = `rate:ip:${getClientIp(req)}:${bucket}`;
-  const userAllowed = await bumpRateLimit(env, userKey, IMAGE_PROXY_RATE_LIMIT, IMAGE_PROXY_RATE_WINDOW);
-  const ipAllowed = await bumpRateLimit(env, ipKey, IMAGE_PROXY_RATE_LIMIT, IMAGE_PROXY_RATE_WINDOW);
-  if (!userAllowed || !ipAllowed) return new Response("Too Many Requests", { status: 429 });
-
-  try {
-    const filePath = await getTelegramFilePath(env, fileId, "");
-    const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
-    const res = await fetch(fileUrl);
-    if (!res.ok) return new Response("Upstream error", { status: 502 });
-    const headers = new Headers(res.headers);
-    headers.set("Cache-Control", `public, max-age=${IMAGE_PROXY_TTL_SEC}`);
-    headers.delete("set-cookie");
-    return new Response(res.body, { status: res.status, headers });
-  } catch (e) {
-    return new Response("Not Found", { status: 404 });
-  }
-}
-
-async function adminApi(env, req, pathname) {
+export async function adminApi(env, req, pathname) {
   // Login endpoints don't require session
   if (pathname === "/api/admin/login" && req.method === "POST") {
     const { code } = await req.json();
@@ -3287,244 +2099,362 @@ async function adminApi(env, req, pathname) {
   return new Response(JSON.stringify({ ok:false, error:"Not Found" }), { status: 404, headers: JSON_HEADERS });
 }
 
-async function syncVipCache(env) {
-  const kv = getKv(env);
-  if (!kv) return;
-  const tz = env.TZ || "Asia/Shanghai";
-  const dayKey = getTzDateKey(nowSec(), tz);
-  const syncKey = `vip_cache_sync:${dayKey}`;
-  if (await kv.get(syncKey)) return;
-  const rows = await getDb(env).prepare(
-    `SELECT user_id, expire_at FROM memberships WHERE expire_at > ?`
-  ).bind(nowSec()).all();
-  for (const row of (rows.results || [])) {
-    await setVipCache(env, row.user_id, row.expire_at);
-  }
-  await kv.put(syncKey, "1", { expirationTtl: 2 * 86400 });
-}
+export async function handleWebhook(env, update, origin) {
+  // Track users who DM the bot
+  const msg = update.message;
+  const cbq = update.callback_query;
+  const joinReq = update.chat_join_request;
+  const chatMember = update.chat_member;
+  const myChatMember = update.my_chat_member;
 
-async function syncExpiredUsers(env) {
-  const t = nowSec();
-  await getDb(env).prepare(
-    `INSERT INTO expired_users(user_id, expired_at, updated_at)
-     SELECT user_id, expire_at, ?
-     FROM memberships
-     WHERE expire_at <= ?
-     ON CONFLICT(user_id) DO UPDATE SET expired_at=excluded.expired_at, updated_at=excluded.updated_at`
-  ).bind(t, t).run();
-  await getDb(env).prepare(
-    `DELETE FROM expired_users
-     WHERE user_id IN (SELECT user_id FROM memberships WHERE expire_at > ?)`
-  ).bind(t).run();
-}
+  if (msg && msg.from?.id) await ensureUser(env, msg.from);
 
-async function processBroadcastJobs(env) {
-  // send in small batches to avoid limits
-  const BATCH_SIZE = 50;    // per cron run
-  const PER_SECOND = 4;     // throttle within run
-
-  const job = await getDb(env).prepare(`SELECT * FROM broadcast_jobs WHERE status IN ('pending','sending') ORDER BY created_at ASC LIMIT 1`).first();
-  if (!job) return;
-
-  const t = nowSec();
-  if (job.status === "pending") {
-    await getDb(env).prepare(`UPDATE broadcast_jobs SET status='sending', started_at=? WHERE job_id=?`).bind(t, job.job_id).run();
-  }
-
-  // Determine recipients not yet sent in logs for this job
-  let recipientsQuery = `SELECT u.user_id FROM users u WHERE u.can_dm=1`;
-  let bind = [job.job_id];
-  if (job.audience === "member") {
-    recipientsQuery = `SELECT u.user_id FROM users u JOIN memberships m ON m.user_id=u.user_id WHERE u.can_dm=1 AND m.expire_at > ?`;
-    bind = [nowSec(), job.job_id];
-  }
-  if (job.audience === "nonmember") {
-    recipientsQuery = `SELECT u.user_id FROM users u LEFT JOIN memberships m ON m.user_id=u.user_id WHERE u.can_dm=1 AND (m.user_id IS NULL OR m.expire_at <= ?)`;
-    bind = [nowSec(), job.job_id];
-  }
-
-  // Fetch recipients who have NOT been logged for this job yet.
-  const rows = await getDb(env).prepare(
-    `${recipientsQuery}
-     AND NOT EXISTS (
-       SELECT 1 FROM broadcast_logs bl
-       WHERE bl.job_id = ? AND bl.user_id = u.user_id
-     )
-     ORDER BY u.user_id ASC
-     LIMIT ?`
-  ).bind(...bind, BATCH_SIZE).all();
-  const candidates = rows.results || [];
-
-  let sentThisRun = 0;
-  let ok = 0, fail = 0;
-
-  for (const r of candidates) {
-    if (sentThisRun >= BATCH_SIZE) break;
-
-    // Build template vars (membership-aware)
-    let vars = {};
-    const m = await getMembership(env, r.user_id);
-    if (m) {
-      vars.expire_at = fmtDateTime(m.expire_at, env.TZ);
-      vars.days_left = Math.max(0, Math.ceil((m.expire_at - nowSec())/86400));
-    }
-    try {
-      await sendTemplate(env, r.user_id, job.template_key, { vars });
-      await getDb(env).prepare(`INSERT INTO broadcast_logs(job_id,user_id,status,sent_at) VALUES (?,?,?,?)`).bind(job.job_id, r.user_id, "ok", nowSec()).run();
-      ok++;
-    } catch (e) {
-      const code = Number(e.tg?.error_code || e.status || 0) || null;
-      const msg = String(e.tg?.description || e.message || "error").slice(0, 200);
-      await getDb(env).prepare(`INSERT INTO broadcast_logs(job_id,user_id,status,error_code,error_msg,sent_at) VALUES (?,?,?,?,?,?)`)
-        .bind(job.job_id, r.user_id, "fail", code, msg, nowSec()).run();
-      fail++;
-    }
-
-    sentThisRun++;
-    // throttle
-    await new Promise(res => setTimeout(res, Math.ceil(1000 / PER_SECOND)));
-  }
-
-  // Update job counters
-  await getDb(env).prepare(`UPDATE broadcast_jobs SET ok=ok+?, fail=fail+? WHERE job_id=?`).bind(ok, fail, job.job_id).run();
-
-  // Check completion
-  const logsCount = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM broadcast_logs WHERE job_id=?`).bind(job.job_id).first()).c;
-  if (logsCount >= job.total) {
-    await getDb(env).prepare(`UPDATE broadcast_jobs SET status='done', finished_at=? WHERE job_id=?`).bind(nowSec(), job.job_id).run();
-  }
-}
-
-async function processAutoRules(env) {
-  const rules = await getDb(env).prepare(`SELECT * FROM auto_rules WHERE is_enabled=1`).all();
-  const items = rules.results || [];
-  const t = nowSec();
-
-  for (const rule of items) {
-    const isExpireTodayRule = rule.kind === "nonmember_monthly";
-    // exp_before / exp_after / expire_today
-    const offsetSec = isExpireTodayRule ? 0 : rule.offset_days * 86400;
-    const start = rule.kind === "exp_before" ? (t + offsetSec) : (t - offsetSec);
-    // allow 1-day window to avoid missing due to cron schedule
-    const windowStart = start - 12*3600;
-    const windowEnd   = start + 12*3600;
-
-    const candidates = await getDb(env).prepare(
-      `SELECT m.user_id, m.expire_at
-       FROM memberships m
-       JOIN users u ON u.user_id=m.user_id
-       WHERE u.can_dm=1 AND m.expire_at BETWEEN ? AND ?
-       LIMIT 200`
-    ).bind(windowStart, windowEnd).all();
-
-    for (const r of (candidates.results || [])) {
-      const rs = await getDb(env).prepare(`SELECT last_sent_at FROM rule_sends WHERE user_id=? AND rule_key=?`).bind(r.user_id, rule.rule_key).first();
-      if (rs && (t - rs.last_sent_at) < 20*3600) continue; // don't spam same rule within 20h
-      const vars = {
-        expire_at: fmtDateTime(r.expire_at, env.TZ),
-        days_left: Math.max(0, Math.ceil((r.expire_at - t) / 86400))
-      };
+  if (myChatMember) {
+    const chat = myChatMember.chat;
+    const newStatus = myChatMember.new_chat_member?.status;
+    const inviterId = myChatMember.from?.id;
+    const adminIds = parseAdminIds(env);
+    const botAdded = ["member", "administrator"].includes(newStatus);
+    if (botAdded && chat?.id && !adminIds.includes(inviterId)) {
       try {
-        await sendTemplate(env, r.user_id, rule.template_key, { vars });
-        await getDb(env).prepare(
-          `INSERT INTO rule_sends(user_id,rule_key,last_sent_at) VALUES (?,?,?)
-           ON CONFLICT(user_id,rule_key) DO UPDATE SET last_sent_at=excluded.last_sent_at`
-        ).bind(r.user_id, rule.rule_key, t).run();
-        await new Promise(res => setTimeout(res, 250));
-      } catch {}
+        await tgCall(env, "leaveChat", { chat_id: chat.id });
+      } catch {
+        // ignore
+      }
+      return;
     }
   }
-}
 
-async function kickExpired(env) {
-  // remove users expired from all managed chats where they were approved by bot
-  const t = nowSec();
-  const rows = await getDb(env).prepare(
-    `SELECT uc.user_id, uc.chat_id
-     FROM user_chats uc
-     JOIN memberships m ON m.user_id=uc.user_id
-     JOIN managed_chats c ON c.chat_id=uc.chat_id AND c.is_enabled=1
-     WHERE uc.removed_at IS NULL AND m.expire_at <= ?
-     LIMIT 200`
-  ).bind(t).all();
-
-  for (const r of (rows.results || [])) {
-    try {
-      // Kick: ban for 30 seconds then unban
-      await tgCall(env, "banChatMember", { chat_id: r.chat_id, user_id: r.user_id, until_date: t + 30 });
-      await tgCall(env, "unbanChatMember", { chat_id: r.chat_id, user_id: r.user_id, only_if_banned: true });
-      await getDb(env).prepare(`UPDATE user_chats SET removed_at=? WHERE user_id=? AND chat_id=?`).bind(t, r.user_id, r.chat_id).run();
-      await new Promise(res => setTimeout(res, 200));
-    } catch {
-      // ignore; could be missing permissions
+  if (msg?.new_chat_members?.length) {
+    const botInfo = msg.new_chat_members.find(member => member?.is_bot);
+    if (botInfo && msg.chat?.id) {
+      const adminIds = parseAdminIds(env);
+      const inviterId = msg.from?.id;
+      if (!adminIds.includes(inviterId)) {
+        try {
+          await tgCall(env, "leaveChat", { chat_id: msg.chat.id });
+        } catch {
+          // ignore
+        }
+        return;
+      }
     }
   }
-}
 
-export default {
-  async fetch(req, env, ctx) {
-    const envIssues = validateEnv(env);
-    if (envIssues.length) {
-      return new Response(JSON.stringify({ ok: false, error: envIssues.join(" ") }), { status: 500, headers: JSON_HEADERS });
-    }
-    const url = new URL(req.url);
-    const path = url.pathname;
-
-    if (path === "/tg/webhook" && req.method === "POST") {
-      const update = await req.json();
-      const origin = new URL(req.url).origin;
-      ctx.waitUntil(handleWebhook(env, update, origin));
-      return new Response(JSON.stringify({ ok: true }), { headers: JSON_HEADERS });
-    }
-
-    if (path.startsWith(IMAGE_PROXY_PREFIX) && req.method === "GET") {
-      return handleImageProxyRequest(env, req, url);
-    }
-
-    if (path === "/bing-images" && req.method === "GET") {
-      return handleBingImagesRequest();
-    }
-
-    // Admin UI
-    if (path === "/admin" || path === "/") {
-      const token = url.searchParams.get("token");
-      if (token) {
-        const userId = await consumeAdminLoginToken(env, token);
-        if (userId) {
-          const sessionToken = await createAdminSession(env, userId);
-          return new Response("", {
-            status: 302,
-            headers: {
-              "Location": "/admin#dashboard",
-              "set-cookie": `admin_session=${sessionToken}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=${7*24*3600}`
-            }
-          });
+    // Enforce membership on chat member changes (new joins after bot added)
+  if (chatMember) {
+    const chatId = chatMember.chat?.id;
+    const memberUser = chatMember.new_chat_member?.user;
+    const status = chatMember.new_chat_member?.status;
+    if (chatId && memberUser && !memberUser.is_bot) {
+      const managed = await getDb(env).prepare(`SELECT chat_id FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
+      if (managed && (status === "member" || status === "restricted")) {
+        const memberOk = await isMember(env, memberUser.id);
+        if (!memberOk) {
+          const t = nowSec();
+          try {
+            await tgCall(env, "banChatMember", { chat_id: chatId, user_id: memberUser.id, until_date: t + 30 });
+            await tgCall(env, "unbanChatMember", { chat_id: chatId, user_id: memberUser.id, only_if_banned: true });
+            await getDb(env).prepare(`UPDATE user_chats SET removed_at=? WHERE user_id=? AND chat_id=?`).bind(t, memberUser.id, chatId).run();
+          } catch {
+            // ignore permission errors
+          }
         }
       }
-      const userId = await isAdminSession(env, req);
-      if (userId) {
-        return new Response(adminHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
-      }
-      return new Response(wallpaperHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
-
-    if (path.startsWith("/api/admin/")) {
-      return adminApi(env, req, path);
-    }
-
-    return new Response("Not Found", { status: 404 });
-  },
-
-  async scheduled(event, env, ctx) {
-    const envIssues = validateEnv(env);
-    if (envIssues.length) return;
-    // Cron: broadcast queue + auto reminders + kick expired
-    ctx.waitUntil((async ()=>{
-      await syncVipCache(env);
-      await syncExpiredUsers(env);
-      await processBroadcastJobs(env);
-      await processAutoRules(env);
-      await kickExpired(env);
-    })());
   }
-};
+
+  // Join request handling (for managed chats only)
+  if (joinReq) {
+    const chatId = joinReq.chat?.id;
+    const userId = joinReq.from?.id;
+    const managed = await getDb(env).prepare(`SELECT chat_id FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
+    if (!managed) return;
+
+    const memberOk = await isMember(env, userId);
+    if (memberOk) {
+      await tgCall(env, "approveChatJoinRequest", { chat_id: chatId, user_id: userId });
+      await getDb(env).prepare(
+        `INSERT INTO user_chats(user_id,chat_id,approved_at,removed_at) VALUES (?,?,?,NULL)
+         ON CONFLICT(user_id,chat_id) DO UPDATE SET approved_at=excluded.approved_at, removed_at=NULL`
+      ).bind(userId, chatId, nowSec()).run();
+    } else {
+      await tgCall(env, "declineChatJoinRequest", { chat_id: chatId, user_id: userId });
+      // If we can DM, send "denied" template
+      const u = await getDb(env).prepare(`SELECT can_dm FROM users WHERE user_id=?`).bind(userId).first();
+      if (u && u.can_dm === 1) {
+        try {
+          const tpl = await getTemplate(env, "join_denied");
+          if (tpl) {
+            await sendTemplate(env, userId, "join_denied");
+          } else {
+            await tgCall(env, "sendMessage", { chat_id: userId, text: "您当前不是VIP用户或会员已到期，请发送卡密验证。" });
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+    }
+    return;
+  }
+
+  // Callback query buttons
+  if (cbq) {
+    const userId = cbq.from?.id;
+    const chatId = cbq.message?.chat?.id;
+    const data = cbq.data || "";
+
+    // Always answer callback to avoid "loading"
+    try { await tgCall(env, "answerCallbackQuery", { callback_query_id: cbq.id }); } catch {}
+
+    if (!isPrivateChat(cbq.message)) return;
+
+    if (data === "VERIFY") {
+      if (await isSupportOpen(env, userId)) {
+        await closeSupport(env, userId);
+      }
+      await setAwaitingCode(env, userId, true);
+      try {
+        const tpl = await getTemplate(env, "ask_code");
+        if (tpl) {
+          await sendTemplate(env, chatId, "ask_code");
+        } else {
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
+        }
+      } catch {
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
+      }
+      return;
+    }
+    if (data === "SUPPORT") {
+      if (await isSupportBlocked(env, userId)) {
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: "你已被管理员屏蔽使用人工客服，请稍后再试。" });
+        return;
+      }
+      if (await isSupportTempBanned(env, userId)) {
+        const spamTpl = await getTemplate(env, "support_closed_spam");
+        if (spamTpl) {
+          await sendTemplate(env, chatId, "support_closed_spam");
+        } else {
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
+        }
+        return;
+      }
+      if (await isSupportOpen(env, userId)) {
+        await closeSupport(env, userId);
+        const tpl = await getTemplate(env, SUPPORT_CLOSED_TEMPLATE_KEY);
+        if (tpl) {
+          await sendTemplate(env, chatId, SUPPORT_CLOSED_TEMPLATE_KEY);
+        } else {
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭！" });
+        }
+        return;
+      }
+      await setAwaitingCode(env, userId, false);
+      await openSupport(env, userId);
+      await sendTemplate(env, chatId, "support_open");
+      return;
+    }
+    return;
+  }
+
+  // Messages
+  if (!msg) return;
+  if (!isPrivateChat(msg)) return;
+
+  const userId = msg.from?.id;
+  const text = msg.text || msg.caption || "";
+  const t = nowSec();
+  const adminIds = parseAdminIds(env);
+  const isAdmin = adminIds.includes(userId);
+
+  // Admin commands in private chat
+  if (text.startsWith("/login")) {
+    await handleAdminLoginCommand(env, msg, origin);
+    return;
+  }
+
+  // Admin reply command: /reply <user_id> <text>
+  if (isAdmin && text.startsWith("/reply")) {
+    const m = text.match(/^\/reply\s+(\d+)\s+([\s\S]+)$/);
+    if (m) {
+      const target = Number(m[1]);
+      const body = m[2];
+      try {
+        await trySendMessage(env, target, { chat_id: target, text: body });
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "已发送。"});
+      } catch (e) {
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "发送失败：" + (e.tg?.description || e.message) });
+      }
+    } else {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/reply 用户ID 内容" });
+    }
+    return;
+  }
+
+  // Admin support block commands: /block <user_id> or /unblock <user_id>
+  if (isAdmin && (text.startsWith("/block") || text.startsWith("/support_block"))) {
+    const m = text.match(/^\/(?:block|support_block)\s+(\d+)$/);
+    if (!m) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/block 用户ID" });
+      return;
+    }
+    const target = Number(m[1]);
+    await setSupportBlocked(env, target, true);
+    await tgCall(env, "sendMessage", { chat_id: userId, text: "已屏蔽该用户使用人工客服。" });
+    return;
+  }
+  if (isAdmin && (text.startsWith("/unblock") || text.startsWith("/support_unblock"))) {
+    const m = text.match(/^\/(?:unblock|support_unblock)\s+(\d+)$/);
+    if (!m) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "用法：/unblock 用户ID" });
+      return;
+    }
+    const target = Number(m[1]);
+    await setSupportBlocked(env, target, false);
+    await tgCall(env, "sendMessage", { chat_id: userId, text: "已解除该用户客服屏蔽。" });
+    return;
+  }
+
+  // Support session forwarding (higher priority than other replies)
+  if (await isSupportOpen(env, userId)) {
+    if (await isSupportBlocked(env, userId)) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "你已被管理员屏蔽使用人工客服。" });
+      return;
+    }
+    if (await isSupportTempBanned(env, userId)) {
+      const spamTpl = await getTemplate(env, "support_closed_spam");
+      if (spamTpl) {
+        await sendTemplate(env, userId, "support_closed_spam");
+      } else {
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
+      }
+      return;
+    }
+    const spam = await checkSpamAndMaybeClose(env, userId);
+    if (spam.closedNow) {
+      await sendTemplate(env, userId, "support_closed_spam");
+      return;
+    }
+    if (spam.muted) return;
+
+    const trimmed = text.trim();
+    const code = extractCardCode(text);
+    const isCardCode = code && isLikelyCardCode(code);
+    const isCommand = trimmed.startsWith("/");
+
+    if (!isCommand) {
+      const adminIds2 = parseAdminIds(env);
+      for (const adminId of adminIds2) {
+        await tgCall(env, "forwardMessage", {
+          chat_id: adminId,
+          from_chat_id: userId,
+          message_id: msg.message_id
+        });
+      }
+    }
+
+    if (isCardCode) {
+      await handleCardRedeem(env, userId, code);
+      return;
+    }
+
+    if (isCommand) return;
+    await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
+    return;
+  }
+
+  if (text.startsWith("/start")) {
+    await ensureBotCommands(env);
+    const tpl = await getTemplate(env, "start");
+    if (!tpl) throw new Error("Missing template: start");
+    const buttons = appendFixedStartButtons(tpl.buttons);
+    await trySendMessage(env, userId, {
+      chat_id: userId,
+      text: tpl.text,
+      parse_mode: tpl.parse_mode,
+      disable_web_page_preview: tpl.disable_preview,
+      reply_markup: buildKeyboard(buttons),
+    });
+    return;
+  }
+
+  if (msg.media_group_id && hasImageContent(msg)) {
+    if (await shouldNotifyMediaGroup(env, msg.media_group_id)) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片哦～" });
+    }
+    return;
+  }
+
+  if (isVideoMessage(msg)) {
+    if (await shouldNotifyVideoWarning(env, userId)) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "本机器人只支持图片搜索哦～" });
+    }
+    return;
+  }
+
+  if (await hasVideoWarning(env, userId)) {
+    return;
+  }
+
+  const imageInfo = getMessageImageInfo(msg);
+  if (imageInfo) {
+    const limitCheck = await checkDailyImageLimit(env, userId);
+    if (!limitCheck.allowed) {
+      const tierKey = limitCheck.member ? "member" : "nonmember";
+      if (await shouldNotifyImageLimit(env, userId, tierKey)) {
+        const templateKey = limitCheck.member ? IMAGE_LIMIT_MEMBER_TEMPLATE_KEY : IMAGE_LIMIT_NONMEMBER_TEMPLATE_KEY;
+        const limitTpl = await getTemplate(env, templateKey) || await getTemplate(env, "image_limit");
+        if (limitTpl) {
+          await sendTemplate(env, userId, limitTpl.key);
+        } else if (limitCheck.member) {
+          await tgCall(env, "sendMessage", { chat_id: userId, text: "谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试哦～" });
+        } else {
+          await tgCall(env, "sendMessage", { chat_id: userId, text: "普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～" });
+        }
+      }
+      return;
+    }
+    try {
+      await getTelegramFilePath(env, imageInfo.fileId, imageInfo.fileUniqueId);
+      const imageUrl = await buildSignedProxyUrl(env, origin, imageInfo.fileId, userId);
+      const links = buildImageSearchLinks(imageUrl);
+      const tpl = await getTemplate(env, IMAGE_REPLY_TEMPLATE_KEY);
+      const replyText = renderTemplateText(tpl?.text || IMAGE_REPLY_DEFAULT_TEXT, {
+        image_url: imageUrl,
+        google_lens: links.google,
+        yandex: links.yandex
+      });
+      const replyButtons = renderButtonsWithVars(tpl?.buttons || IMAGE_REPLY_DEFAULT_BUTTONS, {
+        image_url: imageUrl,
+        google_lens: links.google,
+        yandex: links.yandex
+      });
+      await trySendMessage(env, userId, {
+        chat_id: userId,
+        text: replyText,
+        parse_mode: tpl?.parse_mode || "HTML",
+        disable_web_page_preview: tpl ? tpl.disable_preview : true,
+        reply_markup: replyButtons.length ? buildKeyboard(replyButtons) : undefined
+      });
+    } catch (e) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "图片处理失败，请稍后再试。" });
+    }
+    return;
+  }
+
+  const awaitingCode = await isAwaitingCode(env, userId);
+  if (awaitingCode) {
+    if (text) {
+      const code = extractCardCode(text);
+      if (!code || !isLikelyCardCode(code)) {
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
+        return;
+      }
+      await handleCardRedeem(env, userId, code);
+      return;
+    }
+  }
+
+  // Ignore other messages
+}

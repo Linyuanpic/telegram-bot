@@ -1,0 +1,74 @@
+import { getDb } from "./db.js";
+import { getKv } from "./kv.js";
+import { tgCall } from "./telegram.js";
+import { nowSec } from "./utils.js";
+
+/** Generate join-request links for all enabled managed chats */
+export async function getJoinLinks(env) {
+  const chats = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1`).all();
+  return chats.results || [];
+}
+
+export async function ensureJoinRequestLink(env, chatId) {
+  // Create a join-request invite link that is long-lived. Telegram may return existing links but we'll just create a new one and store it in KV cache.
+  const cacheKey = `joinlink:${chatId}`;
+  const cached = await getKv(env).get(cacheKey);
+  if (cached) return cached;
+
+  // createChatInviteLink supports creates_join_request for groups/channels that require approval.
+  // Note: For best results, also set the chat to require join request in Telegram settings.
+  const res = await tgCall(env, "createChatInviteLink", {
+    chat_id: chatId,
+    creates_join_request: true,
+    name: "VIP申请入口",
+  });
+  const link = res.invite_link;
+  await getKv(env).put(cacheKey, link);
+  return link;
+}
+
+/** Build "Apply to join" button list for all managed chats */
+export async function buildApplyButtons(env) {
+  const chats = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1`).all();
+  return buildApplyButtonsFromChats(env, chats.results || []);
+}
+
+export async function buildApplyButtonsFromChats(env, chats) {
+  const rows = [];
+  for (const c of chats) {
+    const link = await ensureJoinRequestLink(env, c.chat_id);
+    rows.push([{ text: c.title ? `申请加入：${c.title}` : `申请加入 ${c.chat_id}`, type: "url", url: link }]);
+  }
+  return rows;
+}
+
+export async function buildApplyButtonsForChat(env, chatId) {
+  const chat = await getDb(env).prepare(`SELECT chat_id, chat_type, title FROM managed_chats WHERE is_enabled=1 AND chat_id=?`).bind(chatId).first();
+  if (!chat) return null;
+  return buildApplyButtonsFromChats(env, [chat]);
+}
+
+export async function kickExpired(env) {
+  // remove users expired from all managed chats where they were approved by bot
+  const t = nowSec();
+  const rows = await getDb(env).prepare(
+    `SELECT uc.user_id, uc.chat_id
+     FROM user_chats uc
+     JOIN memberships m ON m.user_id=uc.user_id
+     JOIN managed_chats c ON c.chat_id=uc.chat_id AND c.is_enabled=1
+     WHERE uc.removed_at IS NULL AND m.expire_at <= ?
+     LIMIT 200`
+  ).bind(t).all();
+
+  for (const r of (rows.results || [])) {
+    try {
+      // Kick: ban for 30 seconds then unban
+      await tgCall(env, "banChatMember", { chat_id: r.chat_id, user_id: r.user_id, until_date: t + 30 });
+      await tgCall(env, "unbanChatMember", { chat_id: r.chat_id, user_id: r.user_id, only_if_banned: true });
+      await getDb(env).prepare(`UPDATE user_chats SET removed_at=? WHERE user_id=? AND chat_id=?`).bind(t, r.user_id, r.chat_id).run();
+      await new Promise(res => setTimeout(res, 200));
+    } catch {
+      // ignore; could be missing permissions
+    }
+  }
+}
