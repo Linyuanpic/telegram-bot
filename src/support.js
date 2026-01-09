@@ -128,6 +128,10 @@ export async function checkSpamAndMaybeClose(env, userId) {
   return { muted: false, closedNow: false };
 }
 
+async function sendSupportClosedNotice(env, chatId) {
+  await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭～" });
+}
+
 /** Admin login: /login in bot DM generates a one-time link */
 export async function handleAdminLoginCommand(env, msg, origin) {
   const adminIds = parseAdminIds(env);
@@ -2212,6 +2216,7 @@ export async function handleWebhook(env, update, origin) {
     if (data === "VERIFY") {
       if (await isSupportOpen(env, userId)) {
         await closeSupport(env, userId);
+        await sendSupportClosedNotice(env, chatId);
       }
       await setAwaitingCode(env, userId, true);
       try {
@@ -2242,12 +2247,7 @@ export async function handleWebhook(env, update, origin) {
       }
       if (await isSupportOpen(env, userId)) {
         await closeSupport(env, userId);
-        const tpl = await getTemplate(env, SUPPORT_CLOSED_TEMPLATE_KEY);
-        if (tpl) {
-          await sendTemplate(env, chatId, SUPPORT_CLOSED_TEMPLATE_KEY);
-        } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭！" });
-        }
+        await sendSupportClosedNotice(env, chatId);
         return;
       }
       await setAwaitingCode(env, userId, false);
