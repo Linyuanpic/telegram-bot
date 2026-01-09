@@ -1,0 +1,126 @@
+-- START template: You can edit text & buy buttons in admin. Verify/Support buttons are appended by code.
+INSERT OR IGNORE INTO templates (key,title,parse_mode,disable_preview,text,buttons_json,updated_at) VALUES
+('start','/start 首页','HTML',0,
+'打赏群！欢迎新春！限时优惠！199元一年 年后结束！<a href="https://example.com">加入会员</a>\n\n<b>提示：</b>请先购买卡密，再点下方“验证卡密”。',
+'[
+  [
+    {"text":"支付宝/微信 购买","type":"url","url":"https://example.com/buy1"},
+    {"text":"支付宝/微信 购买(备用)","type":"url","url":"https://example.com/buy2"}
+  ]
+]',
+strftime('%s','now')),
+
+('ask_code','验证卡密：提示','HTML',0,'请发送卡密：','[]',strftime('%s','now')),
+
+('vip_new','会员验证成功','HTML',0,'您已成为尊贵的VIP用户，可点击下方按钮申请加入打赏群/频道！','[]',strftime('%s','now')),
+
+('vip_renew','会员续费成功','HTML',0,'尊贵的VIP用户，您的会员时长已叠加！可点击下方按钮申请加入打赏群/频道！','[]',strftime('%s','now')),
+
+('support_open','人工客服：提示','HTML',0,'已开启人工客服会话，请发送消息。我会尽快回复。','[]',strftime('%s','now')),
+
+('support_closed','人工客服：关闭提示','HTML',0,'客服通道已关闭！','[]',strftime('%s','now')),
+
+('support_closed_spam','人工客服：刷屏关闭','HTML',0,'请不要刷屏！消息发送失败，请于1小时后再来尝试。','[]',strftime('%s','now')),
+
+('image_limit_nonmember','图片搜索上限：普通用户','HTML',0,'普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～','[]',strftime('%s','now')),
+
+('image_limit_member','图片搜索上限：会员','HTML',0,'谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试哦～','[]',strftime('%s','now')),
+
+('image_limit','图片搜索上限','HTML',0,'普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～','[]',strftime('%s','now')),
+
+('exp_before_30d','到期前30天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。如需续订，请点击下方按钮购买卡密续费。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_before_15d','到期前15天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。请提前续订。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_before_7d','到期前7天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。请及时续订。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_before_3d','到期前3天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_before_1d','到期前1天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+  
+('exp_after_1d','到期后1天提醒','HTML',0,'您的会员已于 <b>{{expire_at}}</b> 失效。如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_after_3d','到期后3天提醒','HTML',0,'您的会员已于 <b>{{expire_at}}</b> 失效。如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_after_7d','到期后7天提醒','HTML',0,'您的会员已于 <b>{{expire_at}}</b> 失效。如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_after_15d','到期后15天提醒','HTML',0,'您的会员已于 <b>{{expire_at}}</b> 失效。如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('exp_after_30d','到期后30天提醒','HTML',0,'您的会员已于 <b>{{expire_at}}</b> 失效。如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密续费","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+  
+('nonmember_monthly','会员到期提醒','HTML',0,'您的会员已到期，如需继续使用，请购买卡密并完成验证。',
+'[
+  [{"text":"购买卡密","type":"url","url":"https://example.com/buy"}]
+]',
+strftime('%s','now')),
+
+('image_reply','图片回复模版','HTML',1,'自助搜图，具体内容点击下方按钮～',
+'[
+  [{"text":"GoogleLens → 看看这是谁","type":"url","url":"{{google_lens}}"}],
+  [{"text":"Yandex.ru → 想找图片来源","type":"url","url":"{{yandex}}"}]
+]',
+strftime('%s','now'));
+
+-- Image hosts
+INSERT OR IGNORE INTO image_hosts (base_url,is_enabled,fail_count,is_faulty,created_at) VALUES
+('https://catbox.moe',1,0,0,strftime('%s','now')),
+('https://litterbox.catbox.moe',1,0,0,strftime('%s','now')),
+('https://0x0.st',1,0,0,strftime('%s','now'));
+
+-- Settings
+INSERT OR IGNORE INTO settings (key,value,updated_at) VALUES
+('image_reply_template','自助搜图，具体内容点击下方按钮～',strftime('%s','now'));
+
+-- Auto rules (enable what you want in admin)
+INSERT OR IGNORE INTO auto_rules(rule_key,kind,offset_days,template_key,is_enabled) VALUES
+('before_30','exp_before',30,'exp_before_30d',1),
+('before_15','exp_before',15,'exp_before_15d',1),
+('before_7','exp_before',7,'exp_before_7d',1),
+('before_3','exp_before',3,'exp_before_3d',1),
+('before_1','exp_before',1,'exp_before_1d',1),
+('after_1','exp_after',1,'exp_after_1d',1),
+('after_3','exp_after',3,'exp_after_3d',1),
+('after_7','exp_after',7,'exp_after_7d',1),
+('after_15','exp_after',15,'exp_after_15d',1),
+('after_30','exp_after',30,'exp_after_30d',1),
+('expire_today','nonmember_monthly',0,'nonmember_monthly',1);
