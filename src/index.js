@@ -22,7 +22,18 @@ export default {
     const path = url.pathname;
 
     if (path === "/tg/webhook" && req.method === "POST") {
-      const update = await req.json();
+      const raw = await req.text();
+      console.log("[tg] raw update:", raw);
+      let update;
+      try {
+        update = JSON.parse(raw);
+      } catch (e) {
+        console.log("[tg] JSON parse error:", String(e));
+        return new Response("bad json", { status: 400 });
+      }
+      console.log("[tg] update keys:", Object.keys(update || {}));
+      console.log("[tg] message text:", update?.message?.text);
+      console.log("[tg] chat id:", update?.message?.chat?.id);
       const origin = new URL(req.url).origin;
       ctx.waitUntil(handleWebhook(env, update, origin));
       return new Response(JSON.stringify({ ok: true }), { headers: JSON_HEADERS });
