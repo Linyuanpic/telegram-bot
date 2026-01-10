@@ -17,6 +17,5 @@ crons = ["*/5 * * * *"]
 [vars]
 ADMIN_USER_IDS = "7204268059"
 TZ = "Asia/Shanghai"
-BOT_TOKEN = "8366967396:AAHONsIYFJSuwwuh9tut5YVdEmFl_tSS8R0"
 
 # You will set secrets via: wrangler secret put BOT_TOKEN
