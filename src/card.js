@@ -139,16 +139,13 @@ export async function handleCardRedeem(env, userId, code) {
     const result = await redeemCardCode(env, userId, code);
     if (!result.ok) {
       if (result.reason === "db_unavailable") {
-        await setAwaitingCode(env, userId, false);
         await tgCall(env, "sendMessage", { chat_id: userId, text: "数据库连接异常，请稍后重试或联系客服处理。" });
         return false;
       }
       if (result.reason === "used") {
-        await setAwaitingCode(env, userId, false);
         await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！此卡密已被使用。" });
         return false;
       }
-      await setAwaitingCode(env, userId, false);
       await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
       return false;
     }
@@ -158,7 +155,6 @@ export async function handleCardRedeem(env, userId, code) {
       ? "尊贵的VIP用户，您的会员时长已叠加！可点击下方按钮申请加入打赏群/频道！"
       : "您已成为尊贵的VIP用户，可点击下方按钮申请加入打赏群/频道！";
     const msgText = renderTemplateText(tpl?.text || fallbackText, { expire_at: fmtDateTime(result.expire_at, env.TZ) });
-    await setAwaitingCode(env, userId, false);
     await trySendMessage(env, userId, {
       chat_id: userId,
       text: msgText,
@@ -168,7 +164,6 @@ export async function handleCardRedeem(env, userId, code) {
     });
     return true;
   } catch {
-    await setAwaitingCode(env, userId, false);
     await tgCall(env, "sendMessage", { chat_id: userId, text: "数据库连接异常，请稍后重试或联系客服处理。" });
     return false;
   }

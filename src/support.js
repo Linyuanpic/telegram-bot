@@ -12,13 +12,7 @@ import {
 import { ensureUser, getDb, getTemplate } from "./db.js";
 import { getKv } from "./kv.js";
 import { isMember } from "./auth.js";
-import {
-  extractCardCode,
-  handleCardRedeem,
-  isAwaitingCode,
-  isLikelyCardCode,
-  setAwaitingCode,
-} from "./card.js";
+import { extractCardCode, handleCardRedeem, isLikelyCardCode } from "./card.js";
 import {
   buildImageSearchLinks,
   buildSignedProxyUrl,
@@ -2213,7 +2207,6 @@ export async function handleWebhook(env, update, origin) {
     if (!isPrivateChat(cbq.message)) return;
 
     if (data === "VERIFY") {
-      await setAwaitingCode(env, userId, true);
       try {
         const tpl = await getTemplate(env, "ask_code");
         if (tpl) {
@@ -2245,7 +2238,6 @@ export async function handleWebhook(env, update, origin) {
         await sendSupportClosedNotice(env, chatId);
         return;
       }
-      await setAwaitingCode(env, userId, false);
       await openSupport(env, userId);
       await sendTemplate(env, chatId, "support_open");
       return;
@@ -2462,16 +2454,6 @@ export async function handleWebhook(env, update, origin) {
         return;
       }
     }
-  }
-
-  const awaitingCode = await isAwaitingCode(env, userId);
-  if (awaitingCode && text) {
-    const code = extractCardCode(text);
-    if (!code || !isLikelyCardCode(code)) {
-      return;
-    }
-    await handleCardRedeem(env, userId, code);
-    return;
   }
 
   // Ignore other messages
