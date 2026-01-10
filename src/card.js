@@ -51,8 +51,8 @@ export function isLikelyCardCode(text) {
 export function extractCardCode(text) {
   if (!text) return null;
   const normalized = normalizeCardCode(text);
-  const match = normalized.match(/[A-Z0-9]{18}/);
-  return match ? match[0] : null;
+  const match = normalized.match(/[A-Z0-9]{18,}/);
+  return match ? match[0].slice(0, CARD_CODE_LENGTH) : null;
 }
 
 export async function redeemCardCode(env, userId, code) {
