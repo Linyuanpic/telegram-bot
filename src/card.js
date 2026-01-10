@@ -144,9 +144,11 @@ export async function handleCardRedeem(env, userId, code) {
         return false;
       }
       if (result.reason === "used") {
+        await setAwaitingCode(env, userId, false);
         await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！此卡密已被使用。" });
         return false;
       }
+      await setAwaitingCode(env, userId, false);
       await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
       return false;
     }
