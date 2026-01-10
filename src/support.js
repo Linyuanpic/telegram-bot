@@ -2348,7 +2348,9 @@ export async function adminApi(env, req, pathname) {
   return new Response(JSON.stringify({ ok:false, error:"Not Found" }), { status: 404, headers: JSON_HEADERS });
 }
 
-export async function handleWebhook(env, update, origin) {
+export async function handleWebhook(env, update, requestUrl) {
+  const requestUrlString = String(requestUrl || "");
+  const baseOrigin = requestUrlString ? new URL(requestUrlString).origin : "";
   // Track users who DM the bot
   const msg = update.message;
   const cbq = update.callback_query;
@@ -2510,7 +2512,7 @@ export async function handleWebhook(env, update, origin) {
 
   // Admin commands in private chat
   if (text.startsWith("/login")) {
-    await handleAdminLoginCommand(env, msg, origin);
+    await handleAdminLoginCommand(env, msg, baseOrigin);
     return;
   }
 
@@ -2685,7 +2687,7 @@ export async function handleWebhook(env, update, origin) {
     }
     try {
       await getTelegramFilePath(env, imageInfo.fileId, imageInfo.fileUniqueId);
-      const imageUrl = await buildSignedProxyUrl(env, origin, imageInfo.fileId, userId);
+      const imageUrl = await buildSignedProxyUrl(env, requestUrlString, imageInfo.fileId, userId);
       const links = buildImageSearchLinks(imageUrl);
       const tpl = await getTemplate(env, IMAGE_REPLY_TEMPLATE_KEY);
       const replyText = renderTemplateText(tpl?.text || IMAGE_REPLY_DEFAULT_TEXT, {

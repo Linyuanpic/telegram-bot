@@ -33,7 +33,7 @@ export const IMAGE_REPLY_DEFAULT_BUTTONS = [
   [{ text: "GoogleLens → 看看这是谁", type: "url", url: "{{google_lens}}" }],
   [{ text: "Yandex.ru → 想找图片来源", type: "url", url: "{{yandex}}" }]
 ];
-export const IMAGE_PROXY_PREFIX = "/tgimg/";
+export const IMAGE_PROXY_PREFIX = "/tgimg";
 export const IMAGE_PROXY_TTL_SEC = 15 * 60;
 export const IMAGE_PROXY_RATE_LIMIT = 3;
 export const IMAGE_PROXY_RATE_WINDOW = 60;

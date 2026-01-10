@@ -34,8 +34,7 @@ export default {
       console.log("[tg] update keys:", Object.keys(update || {}));
       console.log("[tg] message text:", update?.message?.text);
       console.log("[tg] chat id:", update?.message?.chat?.id);
-      const origin = new URL(req.url).origin;
-      ctx.waitUntil(handleWebhook(env, update, origin));
+      ctx.waitUntil(handleWebhook(env, update, req.url));
       return new Response(JSON.stringify({ ok: true }), { headers: JSON_HEADERS });
     }
 
