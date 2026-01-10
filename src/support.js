@@ -2213,20 +2213,16 @@ export async function handleWebhook(env, update, origin) {
     if (!isPrivateChat(cbq.message)) return;
 
     if (data === "VERIFY") {
-      if (await isSupportOpen(env, userId)) {
-        await closeSupport(env, userId);
-        await sendSupportClosedNotice(env, chatId);
-      }
       await setAwaitingCode(env, userId, true);
       try {
         const tpl = await getTemplate(env, "ask_code");
         if (tpl) {
           await sendTemplate(env, chatId, "ask_code");
         } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送18位卡密：" });
         }
       } catch {
-        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送18位卡密：" });
       }
       return;
     }
@@ -2316,7 +2312,8 @@ export async function handleWebhook(env, update, origin) {
   }
 
   // Support session forwarding (higher priority than other replies)
-  if (await isSupportOpen(env, userId)) {
+  const supportOpen = await isSupportOpen(env, userId);
+  if (supportOpen) {
     if (await isSupportBlocked(env, userId)) {
       await tgCall(env, "sendMessage", { chat_id: userId, text: "你已被管理员屏蔽使用人工客服。" });
       return;
@@ -2342,7 +2339,14 @@ export async function handleWebhook(env, update, origin) {
     const isCardCode = code && isLikelyCardCode(code);
     const isCommand = trimmed.startsWith("/");
 
-    if (!isCommand) {
+    if (isCardCode) {
+      await handleCardRedeem(env, userId, code);
+      return;
+    }
+
+    if (isCommand) {
+      // Let commands continue to normal handling without forwarding.
+    } else {
       const adminIds2 = parseAdminIds(env);
       for (const adminId of adminIds2) {
         await tgCall(env, "forwardMessage", {
@@ -2351,16 +2355,9 @@ export async function handleWebhook(env, update, origin) {
           message_id: msg.message_id
         });
       }
-    }
-
-    if (isCardCode) {
-      await handleCardRedeem(env, userId, code);
+      await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
       return;
     }
-
-    if (isCommand) return;
-    await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
-    return;
   }
 
   if (text.startsWith("/start")) {
@@ -2439,18 +2436,42 @@ export async function handleWebhook(env, update, origin) {
     return;
   }
 
-  const awaitingCode = await isAwaitingCode(env, userId);
-  if (awaitingCode) {
-    if (text) {
-      const code = extractCardCode(text);
-      if (!code || !isLikelyCardCode(code)) {
-        await setAwaitingCode(env, userId, false);
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
+  if (text.startsWith("/")) {
+    const commandKey = text.trim().split(/\s+/)[0].slice(1).split("@")[0];
+    if (commandKey) {
+      const cmdTpl = await getTemplate(env, commandKey);
+      if (cmdTpl) {
+        await trySendMessage(env, userId, {
+          chat_id: userId,
+          text: cmdTpl.text,
+          parse_mode: cmdTpl.parse_mode,
+          disable_web_page_preview: cmdTpl.disable_preview,
+          reply_markup: cmdTpl.buttons?.length ? buildKeyboard(cmdTpl.buttons) : undefined,
+        });
         return;
       }
-      await handleCardRedeem(env, userId, code);
+    }
+  }
+
+  if (text) {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("/")) {
+      const code = extractCardCode(text);
+      if (code && isLikelyCardCode(code)) {
+        await handleCardRedeem(env, userId, code);
+        return;
+      }
+    }
+  }
+
+  const awaitingCode = await isAwaitingCode(env, userId);
+  if (awaitingCode && text) {
+    const code = extractCardCode(text);
+    if (!code || !isLikelyCardCode(code)) {
       return;
     }
+    await handleCardRedeem(env, userId, code);
+    return;
   }
 
   // Ignore other messages
