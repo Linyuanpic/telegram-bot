@@ -34,8 +34,8 @@ export const IMAGE_REPLY_DEFAULT_BUTTONS = [
   [{ text: "Yandex.ru → 想找图片来源", type: "url", url: "{{yandex}}" }]
 ];
 export const IMAGE_PROXY_PREFIX = "/tgimg";
-export const IMAGE_PROXY_TTL_SEC = 60 * 60;
-export const IMAGE_PROXY_CACHE_TTL_SEC = 6 * 60 * 60;
+export const IMAGE_PROXY_TTL_SEC = 12 * 60 * 60;
+export const IMAGE_PROXY_CACHE_TTL_SEC = 7 * 24 * 3600;
 export const IMAGE_PROXY_RATE_LIMIT = 3;
 export const IMAGE_PROXY_RATE_WINDOW = 60;
 export const FILE_PATH_CACHE_TTL = 7 * 24 * 3600;
