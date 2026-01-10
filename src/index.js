@@ -21,7 +21,7 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    if (path === "/tg/webhook" && req.method === "POST") {
+    if ((path === "/tg/webhook" || path === "/telegram") && req.method === "POST") {
       const raw = await req.text();
       console.log("[tg] raw update:", raw);
       let update;
