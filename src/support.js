@@ -2219,10 +2219,10 @@ export async function handleWebhook(env, update, origin) {
         if (tpl) {
           await sendTemplate(env, chatId, "ask_code");
         } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送18位卡密：" });
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
         }
       } catch {
-        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送18位卡密：" });
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: "请发送卡密：" });
       }
       return;
     }
