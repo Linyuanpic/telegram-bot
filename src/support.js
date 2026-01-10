@@ -280,13 +280,23 @@ function buildSupportUserInfoText(profile, isVip, userId) {
     `用户身份：${isVip ? "会员用户" : "普通用户"}`,
     "—————————————",
   ];
-  const commands = [
-    `回复：/reply ${userId}`,
-    `屏蔽：/block ${userId}`,
-    `解除：/unblock ${userId}`,
-  ].join("\n");
-  infoLines.push(`<pre>${escapeHtmlText(commands)}</pre>`);
+  infoLines.push(
+    `回复：<code>${escapeHtmlText(`/reply ${userId}`)}</code>`,
+    `屏蔽：<code>${escapeHtmlText(`/block ${userId}`)}</code>`,
+    `解除：<code>${escapeHtmlText(`/unblock ${userId}`)}</code>`
+  );
   return infoLines.join("\n");
+}
+
+async function shouldNotifySupportMediaGroup(env, groupId) {
+  if (!groupId) return true;
+  const kv = getKv(env);
+  if (!kv) return true;
+  const key = `support_media_group_notice:${groupId}`;
+  const notified = await kv.get(key);
+  if (notified) return false;
+  await kv.put(key, "1", { expirationTtl: 120 });
+  return true;
 }
 
 /** Admin login: /login in bot DM generates a one-time link */
@@ -2619,7 +2629,9 @@ export async function handleWebhook(env, update, origin) {
           await storeSupportForwardMap(env, adminId, forwarded?.message_id, userId);
         }
       }
-      await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
+      if (!msg.media_group_id || await shouldNotifySupportMediaGroup(env, msg.media_group_id)) {
+        await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
+      }
       return;
     }
   }
