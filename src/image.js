@@ -36,14 +36,39 @@ async function signProxyPayload(env, payload) {
   return toBase64Url(signature);
 }
 
+function generateOpaqueToken() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return toBase64Url(bytes);
+}
+
+async function storeProxyToken(env, token, fileId, userId) {
+  const kv = getKv(env);
+  const payload = JSON.stringify({ fileId, userId });
+  await kv.put(`image_token:${token}`, payload, { expirationTtl: IMAGE_PROXY_TTL_SEC });
+}
+
+async function readProxyToken(env, token) {
+  if (!token) return null;
+  const kv = getKv(env);
+  const raw = await kv.get(`image_token:${token}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export async function buildSignedProxyUrl(env, origin, fileId, userId) {
   const exp = nowSec() + IMAGE_PROXY_TTL_SEC;
-  const uid = String(userId || "");
-  const payload = `${fileId}|${exp}|${uid}`;
+  const token = generateOpaqueToken();
+  await storeProxyToken(env, token, fileId, String(userId || ""));
+  const payload = `${fileId}|${exp}|${token}`;
   const sig = await signProxyPayload(env, payload);
   const safeFileId = encodeURIComponent(fileId);
   const base = normalizeBaseUrl(origin || env.PUBLIC_BASE_URL || "");
-  return `${base}${IMAGE_PROXY_PREFIX}${safeFileId}?exp=${exp}&uid=${encodeURIComponent(uid)}&sig=${sig}`;
+  return `${base}${IMAGE_PROXY_PREFIX}${safeFileId}?exp=${exp}&token=${encodeURIComponent(token)}&sig=${sig}`;
 }
 
 export async function getTelegramFilePath(env, fileId, fileUniqueId) {
@@ -152,15 +177,19 @@ export async function handleImageProxyRequest(env, req, url) {
   const fileId = decodeURIComponent(url.pathname.slice(IMAGE_PROXY_PREFIX.length));
   if (!fileId) return new Response("Not Found", { status: 404 });
   const exp = Number(url.searchParams.get("exp") || 0);
-  const uid = url.searchParams.get("uid") || "";
+  const token = url.searchParams.get("token") || "";
   const sig = url.searchParams.get("sig") || "";
   if (!exp || !sig) return new Response("Forbidden", { status: 403 });
   if (exp < nowSec()) return new Response("Expired", { status: 403 });
-  const payload = `${fileId}|${exp}|${uid}`;
+  const payload = `${fileId}|${exp}|${token}`;
   const expected = await signProxyPayload(env, payload);
   if (sig !== expected) return new Response("Forbidden", { status: 403 });
 
+  const tokenData = await readProxyToken(env, token);
+  if (!tokenData || tokenData.fileId !== fileId) return new Response("Forbidden", { status: 403 });
+
   const bucket = Math.floor(nowSec() / IMAGE_PROXY_RATE_WINDOW);
+  const uid = tokenData.userId || "";
   const userKey = `rate:uid:${uid || "anon"}:${bucket}`;
   const ipKey = `rate:ip:${getClientIp(req)}:${bucket}`;
   const userAllowed = await bumpRateLimit(env, userKey, IMAGE_PROXY_RATE_LIMIT, IMAGE_PROXY_RATE_WINDOW);
