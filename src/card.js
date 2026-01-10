@@ -90,28 +90,25 @@ export async function redeemCardCode(env, userId, code) {
     const baseExpire = wasMember ? previous.expire_at : t;
     newExpire = baseExpire + codeRow.days * 86400;
 
-    const claimed = await db
-      .prepare(
-        `WITH claimed AS (
-          UPDATE codes
-          SET status='used', used_by=?, used_at=?
-          WHERE code=? AND status='unused'
-          RETURNING 1
-        ),
-        upsert AS (
-          INSERT INTO memberships(user_id, verified_at, expire_at, updated_at)
-          SELECT ?, ?, ?, ?
-          WHERE EXISTS (SELECT 1 FROM claimed)
-          ON CONFLICT(user_id) DO UPDATE SET
-            expire_at=excluded.expire_at,
-            updated_at=excluded.updated_at
-        )
-        SELECT COUNT(*) AS claimed FROM claimed`
-      )
-      .bind(userId, t, normalized, userId, t, newExpire, t)
-      .first();
-
-    if (!claimed || Number(claimed.claimed || 0) !== 1) {
+    const [claimResult] = await db.batch([
+      db.prepare(
+        `UPDATE codes
+         SET status='used', used_by=?, used_at=?
+         WHERE code=? AND status='unused'`
+      ).bind(userId, t, normalized),
+      db.prepare(
+        `INSERT INTO memberships(user_id, verified_at, expire_at, updated_at)
+         SELECT ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM codes WHERE code=? AND status='used' AND used_by=? AND used_at=?
+         )
+         ON CONFLICT(user_id) DO UPDATE SET
+           expire_at=excluded.expire_at,
+           updated_at=excluded.updated_at`
+      ).bind(userId, t, newExpire, t, normalized, userId, t),
+    ]);
+    const claimChanges = claimResult?.meta?.changes || 0;
+    if (claimChanges !== 1) {
       return { ok: false, reason: "used" };
     }
   } catch (e) {
