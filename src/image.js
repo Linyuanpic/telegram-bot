@@ -5,6 +5,7 @@ import {
   IMAGE_PROXY_PREFIX,
   IMAGE_PROXY_RATE_LIMIT,
   IMAGE_PROXY_RATE_WINDOW,
+  IMAGE_PROXY_CACHE_TTL_SEC,
   IMAGE_PROXY_TTL_SEC,
   JSON_HEADERS,
 } from "./config.js";
@@ -183,7 +184,6 @@ export async function handleImageProxyRequest(env, req, url) {
   const token = url.searchParams.get("token") || "";
   const sig = url.searchParams.get("sig") || "";
   if (!exp || !sig) return new Response("Forbidden", { status: 403 });
-  if (exp < nowSec()) return new Response("Expired", { status: 403 });
   const signedParams = new URLSearchParams();
   signedParams.set("file_id", fileId);
   signedParams.set("exp", String(exp));
@@ -191,6 +191,15 @@ export async function handleImageProxyRequest(env, req, url) {
   const payload = signedParams.toString();
   const expected = await signProxyPayload(env, payload);
   if (sig !== expected) return new Response("Forbidden", { status: 403 });
+
+  const cache = caches.default;
+  const cacheKeyUrl = new URL(url.origin + IMAGE_PROXY_PREFIX);
+  cacheKeyUrl.searchParams.set("file_id", fileId);
+  const cacheKey = new Request(cacheKeyUrl.toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  if (exp < nowSec()) return new Response("Expired", { status: 403 });
 
   const tokenData = await readProxyToken(env, token);
   if (!tokenData || tokenData.fileId !== fileId) return new Response("Forbidden", { status: 403 });
@@ -209,9 +218,13 @@ export async function handleImageProxyRequest(env, req, url) {
     const res = await fetch(fileUrl);
     if (!res.ok) return new Response("Upstream error", { status: 502 });
     const headers = new Headers(res.headers);
-    headers.set("Cache-Control", `public, max-age=${IMAGE_PROXY_TTL_SEC}`);
+    headers.set("Cache-Control", `public, max-age=${IMAGE_PROXY_CACHE_TTL_SEC}`);
     headers.delete("set-cookie");
-    return new Response(res.body, { status: res.status, headers });
+    const response = new Response(res.body, { status: res.status, headers });
+    if (res.ok) {
+      await cache.put(cacheKey, response.clone());
+    }
+    return response;
   } catch (e) {
     return new Response("Not Found", { status: 404 });
   }
