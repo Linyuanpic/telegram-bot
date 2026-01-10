@@ -60,15 +60,18 @@ async function readProxyToken(env, token) {
   }
 }
 
-export async function buildSignedProxyUrl(env, origin, fileId, userId) {
+export async function buildSignedProxyUrl(env, requestUrl, fileId, userId) {
   const exp = nowSec() + IMAGE_PROXY_TTL_SEC;
   const token = generateOpaqueToken();
   await storeProxyToken(env, token, fileId, String(userId || ""));
-  const payload = `${fileId}|${exp}|${token}`;
+  const params = new URLSearchParams();
+  params.set("file_id", fileId);
+  params.set("exp", String(exp));
+  params.set("token", token);
+  const payload = params.toString();
   const sig = await signProxyPayload(env, payload);
-  const safeFileId = encodeURIComponent(fileId);
-  const base = normalizeBaseUrl(origin || env.PUBLIC_BASE_URL || "");
-  return `${base}${IMAGE_PROXY_PREFIX}${safeFileId}?exp=${exp}&token=${encodeURIComponent(token)}&sig=${sig}`;
+  const base = normalizeBaseUrl(new URL(requestUrl).origin);
+  return `${base}${IMAGE_PROXY_PREFIX}?${payload}&sig=${encodeURIComponent(sig)}`;
 }
 
 export async function getTelegramFilePath(env, fileId, fileUniqueId) {
@@ -174,14 +177,18 @@ function getClientIp(req) {
 }
 
 export async function handleImageProxyRequest(env, req, url) {
-  const fileId = decodeURIComponent(url.pathname.slice(IMAGE_PROXY_PREFIX.length));
+  const fileId = url.searchParams.get("file_id") || "";
   if (!fileId) return new Response("Not Found", { status: 404 });
   const exp = Number(url.searchParams.get("exp") || 0);
   const token = url.searchParams.get("token") || "";
   const sig = url.searchParams.get("sig") || "";
   if (!exp || !sig) return new Response("Forbidden", { status: 403 });
   if (exp < nowSec()) return new Response("Expired", { status: 403 });
-  const payload = `${fileId}|${exp}|${token}`;
+  const signedParams = new URLSearchParams();
+  signedParams.set("file_id", fileId);
+  signedParams.set("exp", String(exp));
+  signedParams.set("token", token);
+  const payload = signedParams.toString();
   const expected = await signProxyPayload(env, payload);
   if (sig !== expected) return new Response("Forbidden", { status: 403 });
 
