@@ -16,7 +16,7 @@
 ## 2. 创建 D1 和 KV
 ```bash
 # 创建 D1
-wrangler d1 create linyuanpic-bot
+wrangler d1 create linyuan-bot
 
 # 创建 KV
 wrangler kv namespace create KV
@@ -28,8 +28,8 @@ wrangler kv namespace create KV
 
 ## 3. 初始化数据库表
 ```bash
-wrangler d1 execute linyuanpic-bot --file=./schema.sql
-wrangler d1 execute linyuanpic-bot --file=./seed.sql
+wrangler d1 execute linyuan-bot --file=./schema.sql
+wrangler d1 execute linyuan-bot --file=./seed.sql
 ```
 
 ## 4. 配置环境变量与 Secrets
