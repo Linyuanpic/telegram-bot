@@ -123,6 +123,100 @@ export async function checkSpamAndMaybeClose(env, userId) {
   return { muted: false, closedNow: false };
 }
 
+const MEDIA_GROUP_BUFFER_MS = 500;
+const mediaGroupBuffers = new Map();
+
+function buildMediaGroupItem(msg, includeCaption) {
+  if (!msg) return null;
+  if (msg.photo?.length) {
+    const item = { type: "photo", media: msg.photo[msg.photo.length - 1].file_id };
+    if (includeCaption && msg.caption) item.caption = msg.caption;
+    return item;
+  }
+  if (msg.video?.file_id) {
+    const item = { type: "video", media: msg.video.file_id };
+    if (includeCaption && msg.caption) item.caption = msg.caption;
+    return item;
+  }
+  if (msg.document?.file_id) {
+    const item = { type: "document", media: msg.document.file_id };
+    if (includeCaption && msg.caption) item.caption = msg.caption;
+    return item;
+  }
+  if (msg.audio?.file_id) {
+    const item = { type: "audio", media: msg.audio.file_id };
+    if (includeCaption && msg.caption) item.caption = msg.caption;
+    return item;
+  }
+  return null;
+}
+
+async function flushSupportMediaGroup(env, groupId) {
+  const entry = mediaGroupBuffers.get(groupId);
+  if (!entry) return;
+  mediaGroupBuffers.delete(groupId);
+  const messages = entry.messages.slice().sort((a, b) => (a.message_id || 0) - (b.message_id || 0));
+  const media = [];
+  let captionAdded = false;
+  const fallback = [];
+  for (const msg of messages) {
+    const item = buildMediaGroupItem(msg, !captionAdded);
+    if (!item) {
+      fallback.push(msg);
+      continue;
+    }
+    if (item.caption) captionAdded = true;
+    media.push(item);
+  }
+  const adminIds = parseAdminIds(env);
+  if (media.length) {
+    for (const adminId of adminIds) {
+      const forwarded = await tgCall(env, "sendMediaGroup", { chat_id: adminId, media });
+      if (Array.isArray(forwarded)) {
+        for (const forwardedMsg of forwarded) {
+          await storeSupportForwardMap(env, adminId, forwardedMsg?.message_id, entry.userId);
+        }
+      }
+    }
+  }
+  if (fallback.length) {
+    for (const msg of fallback) {
+      for (const adminId of adminIds) {
+        const forwarded = await tgCall(env, "forwardMessage", {
+          chat_id: adminId,
+          from_chat_id: entry.userId,
+          message_id: msg.message_id
+        });
+        await storeSupportForwardMap(env, adminId, forwarded?.message_id, entry.userId);
+      }
+    }
+  }
+}
+
+function bufferSupportMediaGroup(env, msg) {
+  const groupId = msg.media_group_id;
+  if (!groupId) return Promise.resolve();
+  let entry = mediaGroupBuffers.get(groupId);
+  if (!entry) {
+    entry = { messages: [], timer: null, promise: null, resolve: null, userId: msg.from?.id };
+    entry.promise = new Promise((resolve) => {
+      entry.resolve = resolve;
+    });
+    mediaGroupBuffers.set(groupId, entry);
+  }
+  if (!entry.userId) entry.userId = msg.from?.id;
+  entry.messages.push(msg);
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(async () => {
+    try {
+      await flushSupportMediaGroup(env, groupId);
+    } finally {
+      entry.resolve?.();
+    }
+  }, MEDIA_GROUP_BUFFER_MS);
+  return entry.promise;
+}
+
 async function sendSupportClosedNotice(env, chatId) {
   await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭～" });
 }
@@ -184,14 +278,12 @@ function buildSupportUserInfoText(profile, isVip, userId) {
     `姓名：${escapeHtmlText(name)}`,
     `用户ID：${userId}`,
     `用户身份：${isVip ? "会员用户" : "普通用户"}`,
-    "———————————",
-    "下面这里显示可对用户使用的指令",
+    "—————————————",
   ];
   const commands = [
-    `查看信息：/id`,
-    `回复：/reply ${userId} 内容`,
+    `回复：/reply ${userId}`,
     `屏蔽：/block ${userId}`,
-    `解除屏蔽：/unblock ${userId}`,
+    `解除：/unblock ${userId}`,
   ].join("\n");
   infoLines.push(`<pre>${escapeHtmlText(commands)}</pre>`);
   return infoLines.join("\n");
@@ -2420,7 +2512,6 @@ export async function handleWebhook(env, update, origin) {
       const body = m[2];
       try {
         await trySendMessage(env, target, { chat_id: target, text: body });
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "已发送。"});
       } catch (e) {
         await tgCall(env, "sendMessage", { chat_id: userId, text: "发送失败：" + (e.tg?.description || e.message) });
       }
@@ -2472,7 +2563,6 @@ export async function handleWebhook(env, update, origin) {
     if (trimmed && !trimmed.startsWith("/")) {
       try {
         await trySendMessage(env, repliedUserId, { chat_id: repliedUserId, text: text });
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "已发送。" });
       } catch (e) {
         await tgCall(env, "sendMessage", { chat_id: userId, text: "发送失败：" + (e.tg?.description || e.message) });
       }
@@ -2516,14 +2606,18 @@ export async function handleWebhook(env, update, origin) {
     if (isCommand) {
       // Let commands continue to normal handling without forwarding.
     } else {
-      const adminIds2 = parseAdminIds(env);
-      for (const adminId of adminIds2) {
-        const forwarded = await tgCall(env, "forwardMessage", {
-          chat_id: adminId,
-          from_chat_id: userId,
-          message_id: msg.message_id
-        });
-        await storeSupportForwardMap(env, adminId, forwarded?.message_id, userId);
+      if (msg.media_group_id) {
+        await bufferSupportMediaGroup(env, msg);
+      } else {
+        const adminIds2 = parseAdminIds(env);
+        for (const adminId of adminIds2) {
+          const forwarded = await tgCall(env, "forwardMessage", {
+            chat_id: adminId,
+            from_chat_id: userId,
+            message_id: msg.message_id
+          });
+          await storeSupportForwardMap(env, adminId, forwarded?.message_id, userId);
+        }
       }
       await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
       return;
