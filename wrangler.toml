@@ -15,6 +15,7 @@ id = "61884290f78648e6b004363952a3cdb2"
 crons = ["*/5 * * * *"]
 
 [vars]
+# Non-sensitive configuration only. Store BOT_TOKEN as a secret.
 ADMIN_USER_IDS = "7204268059"
 TZ = "Asia/Shanghai"
 
