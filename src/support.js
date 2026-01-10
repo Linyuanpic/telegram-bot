@@ -139,6 +139,33 @@ function getForwardedUserId(msg) {
   return Number.isFinite(id) ? id : null;
 }
 
+async function getForwardedUserIdFromKv(env, msg) {
+  const reply = msg?.reply_to_message;
+  const chatId = msg?.chat?.id;
+  if (!reply || !Number.isFinite(chatId)) return null;
+  const messageId = reply?.message_id;
+  if (!Number.isFinite(messageId)) return null;
+  const kv = getKv(env);
+  if (!kv) return null;
+  const stored = await kv.get(`support_forward:${chatId}:${messageId}`);
+  if (!stored) return null;
+  const parsed = Number(stored);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function resolveSupportUserId(env, msg) {
+  const direct = getForwardedUserId(msg);
+  if (direct) return direct;
+  return await getForwardedUserIdFromKv(env, msg);
+}
+
+async function storeSupportForwardMap(env, adminId, messageId, userId) {
+  if (!Number.isFinite(adminId) || !Number.isFinite(messageId) || !Number.isFinite(userId)) return;
+  const kv = getKv(env);
+  if (!kv) return;
+  await kv.put(`support_forward:${adminId}:${messageId}`, String(userId), { expirationTtl: 86400 });
+}
+
 async function getSupportUserProfile(env, userId) {
   if (!Number.isFinite(userId)) return null;
   const row = await getDb(env).prepare(
@@ -161,6 +188,7 @@ function buildSupportUserInfoText(profile, isVip, userId) {
     "下面这里显示可对用户使用的指令",
   ];
   const commands = [
+    `查看信息：/id`,
     `回复：/reply ${userId} 内容`,
     `屏蔽：/block ${userId}`,
     `解除屏蔽：/unblock ${userId}`,
@@ -2376,7 +2404,7 @@ export async function handleWebhook(env, update, origin) {
   const t = nowSec();
   const adminIds = parseAdminIds(env);
   const isAdmin = adminIds.includes(userId);
-  const repliedUserId = isAdmin ? getForwardedUserId(msg) : null;
+  const repliedUserId = isAdmin ? await resolveSupportUserId(env, msg) : null;
 
   // Admin commands in private chat
   if (text.startsWith("/login")) {
@@ -2428,7 +2456,7 @@ export async function handleWebhook(env, update, origin) {
 
   if (isAdmin && repliedUserId) {
     const trimmed = text.trim();
-    if (trimmed === "/") {
+    if (trimmed === "/id") {
       const [profile, vip] = await Promise.all([
         getSupportUserProfile(env, repliedUserId),
         isMember(env, repliedUserId),
@@ -2490,11 +2518,12 @@ export async function handleWebhook(env, update, origin) {
     } else {
       const adminIds2 = parseAdminIds(env);
       for (const adminId of adminIds2) {
-        await tgCall(env, "forwardMessage", {
+        const forwarded = await tgCall(env, "forwardMessage", {
           chat_id: adminId,
           from_chat_id: userId,
           message_id: msg.message_id
         });
+        await storeSupportForwardMap(env, adminId, forwarded?.message_id, userId);
       }
       await trySendMessage(env, userId, { chat_id: userId, text: "消息已发送给客服，请耐心等待回复。" });
       return;
