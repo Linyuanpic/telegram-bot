@@ -28,6 +28,7 @@ import {
   buildKeyboard,
   buildUserDisplay,
   buildUserStatusLabel,
+  escapeHtmlText,
   fmtDateTime,
   getMessageImageInfo,
   getTzParts,
@@ -124,6 +125,48 @@ export async function checkSpamAndMaybeClose(env, userId) {
 
 async function sendSupportClosedNotice(env, chatId) {
   await tgCall(env, "sendMessage", { chat_id: chatId, text: "客服通道已关闭～" });
+}
+
+function getForwardedUserId(msg) {
+  const reply = msg?.reply_to_message;
+  if (!reply) return null;
+  const id =
+    reply?.forward_from?.id ??
+    reply?.forward_origin?.sender_user?.id ??
+    reply?.forward_origin?.sender_user_id ??
+    reply?.forward_from_chat?.id ??
+    null;
+  return Number.isFinite(id) ? id : null;
+}
+
+async function getSupportUserProfile(env, userId) {
+  if (!Number.isFinite(userId)) return null;
+  const row = await getDb(env).prepare(
+    `SELECT user_id, username, first_name, last_name
+     FROM users
+     WHERE user_id=?`
+  ).bind(userId).first();
+  return row || null;
+}
+
+function buildSupportUserInfoText(profile, isVip, userId) {
+  const name = [profile?.first_name, profile?.last_name].filter(Boolean).join(" ")
+    || profile?.username
+    || String(userId || "");
+  const infoLines = [
+    `姓名：${escapeHtmlText(name)}`,
+    `用户ID：${userId}`,
+    `用户身份：${isVip ? "会员用户" : "普通用户"}`,
+    "———————————",
+    "下面这里显示可对用户使用的指令",
+  ];
+  const commands = [
+    `回复：/reply ${userId} 内容`,
+    `屏蔽：/block ${userId}`,
+    `解除屏蔽：/unblock ${userId}`,
+  ].join("\n");
+  infoLines.push(`<pre>${escapeHtmlText(commands)}</pre>`);
+  return infoLines.join("\n");
 }
 
 /** Admin login: /login in bot DM generates a one-time link */
@@ -2333,6 +2376,7 @@ export async function handleWebhook(env, update, origin) {
   const t = nowSec();
   const adminIds = parseAdminIds(env);
   const isAdmin = adminIds.includes(userId);
+  const repliedUserId = isAdmin ? getForwardedUserId(msg) : null;
 
   // Admin commands in private chat
   if (text.startsWith("/login")) {
@@ -2380,6 +2424,32 @@ export async function handleWebhook(env, update, origin) {
     await setSupportBlocked(env, target, false);
     await tgCall(env, "sendMessage", { chat_id: userId, text: "已解除该用户客服屏蔽。" });
     return;
+  }
+
+  if (isAdmin && repliedUserId) {
+    const trimmed = text.trim();
+    if (trimmed === "/") {
+      const [profile, vip] = await Promise.all([
+        getSupportUserProfile(env, repliedUserId),
+        isMember(env, repliedUserId),
+      ]);
+      const infoText = buildSupportUserInfoText(profile, vip, repliedUserId);
+      await tgCall(env, "sendMessage", {
+        chat_id: userId,
+        text: infoText,
+        parse_mode: "HTML",
+      });
+      return;
+    }
+    if (trimmed && !trimmed.startsWith("/")) {
+      try {
+        await trySendMessage(env, repliedUserId, { chat_id: repliedUserId, text: text });
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "已发送。" });
+      } catch (e) {
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "发送失败：" + (e.tg?.description || e.message) });
+      }
+      return;
+    }
   }
 
   // Support session forwarding (higher priority than other replies)
