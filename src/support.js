@@ -2381,7 +2381,7 @@ export async function handleWebhook(env, update, origin) {
 
   if (msg.media_group_id && hasImageContent(msg)) {
     if (await shouldNotifyMediaGroup(env, msg.media_group_id)) {
-      await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片哦～" });
+      await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片进行搜索哦～" });
     }
     return;
   }
@@ -2435,7 +2435,8 @@ export async function handleWebhook(env, update, origin) {
         text: replyText,
         parse_mode: tpl?.parse_mode || "HTML",
         disable_web_page_preview: tpl ? tpl.disable_preview : true,
-        reply_markup: replyButtons.length ? buildKeyboard(replyButtons) : undefined
+        reply_markup: replyButtons.length ? buildKeyboard(replyButtons) : undefined,
+        reply_to_message_id: msg.message_id
       });
     } catch (e) {
       await tgCall(env, "sendMessage", { chat_id: userId, text: "图片处理失败，请稍后再试。" });
