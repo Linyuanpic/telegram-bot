@@ -26,7 +26,12 @@ strftime('%s','now')),
 
 ('image_limit_member','图片搜索上限：会员','HTML',0,'谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试哦～','[]',strftime('%s','now')),
 
-('image_limit','图片搜索上限','HTML',0,'普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～','[]',strftime('%s','now')),
+('image_reply','图片回复模版','HTML',1,'自助搜图，具体内容点击下方按钮～',
+'[
+  [{"text":"GoogleLens → 看看这是谁","type":"url","url":"{{google_lens}}"}],
+  [{"text":"Yandex.ru → 想找图片来源","type":"url","url":"{{yandex}}"}]
+]',
+strftime('%s','now'));
 
 ('exp_before_30d','到期前30天提醒','HTML',0,'您的会员身份将于 <b>{{expire_at}}</b> 失效（剩余 {{days_left}} 天）。如需续订，请点击下方按钮购买卡密续费。',
 '[
@@ -93,13 +98,6 @@ strftime('%s','now')),
   [{"text":"购买卡密","type":"url","url":"https://example.com/buy"}]
 ]',
 strftime('%s','now')),
-
-('image_reply','图片回复模版','HTML',1,'自助搜图，具体内容点击下方按钮～',
-'[
-  [{"text":"GoogleLens → 看看这是谁","type":"url","url":"{{google_lens}}"}],
-  [{"text":"Yandex.ru → 想找图片来源","type":"url","url":"{{yandex}}"}]
-]',
-strftime('%s','now'));
 
 -- Image hosts
 INSERT OR IGNORE INTO image_hosts (base_url,is_enabled,fail_count,is_faulty,created_at) VALUES
