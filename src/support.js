@@ -30,6 +30,7 @@ import {
   buildUserStatusLabel,
   fmtDateTime,
   getMessageImageInfo,
+  getTzParts,
   getTzDateKey,
   getTzDayStart,
   getTzWeekStart,
@@ -168,7 +169,7 @@ export function adminHtml() {
     .side{width:150px;background:#fff;border:1px solid #dbe2ea;border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;box-shadow:0 1px 2px rgba(15,23,42,0.06)}
     .side-header{display:flex;flex-direction:column;gap:4px}
     .side-title{font-size:18px;font-weight:700;color:#0f172a}
-    .side-sub{color:#94a3b8;font-size:12px}
+    .side-sub{color:#94a3b8;font-size:12px;text-align:center;width:100%}
     .side-nav{display:flex;flex-direction:column;gap:6px}
     .side a{display:flex;align-items:center;justify-content:center;padding:10px 12px;border-radius:10px;color:#1f2937;text-decoration:none;font-weight:500;text-align:center}
     .side a.active{background:#e7f2ff;color:#1378d1;font-weight:600}
@@ -210,11 +211,19 @@ export function adminHtml() {
     .template-editor:focus{outline:none;border-color:#93c5fd;box-shadow:0 0 0 2px rgba(59,130,246,0.2)}
     .btn-row-head{margin-bottom:8px}
     .centered-table th,.centered-table td{text-align:center}
-    .dash-grid{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:12px}
-    .dash-card{display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:120px;gap:6px}
+    .dash-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:12px}
+    .dash-card{display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:100px;gap:6px}
     .dash-card .pill{margin:0 0 8px}
     .dash-card .dash-value{margin-top:10px}
-    .dash-chart{width:100%;height:260px}
+    .dash-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-top:14px}
+    .dash-chart-card{display:flex;flex-direction:column;gap:8px}
+    .dash-chart-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .dash-chart-head h4{margin:0;font-size:14px}
+    .dash-legend{display:flex;gap:12px;font-size:12px;color:#64748b;align-items:center}
+    .dash-legend span{display:flex;align-items:center;gap:6px}
+    .dash-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;background:#2aabee}
+    .dash-legend i.legend-secondary{background:#94a3b8}
+    .dash-chart{width:100%;height:220px}
     .dash-chart svg{width:100%;height:100%}
     .tpl-toolbar{padding-right:0}
     .tpl-toolbar .row-end{margin-right:-4px}
@@ -312,11 +321,24 @@ export function adminHtml() {
       </div>
 
       <div class="card hidden" id="view-dashboard">
-        <h3>数据看板</h3>
         <div id="dash"></div>
-        <div class="card" style="margin-top:14px">
-          <h4 style="margin:0 0 12px">近一个月机器人用户数量</h4>
-          <div id="dashChart" class="dash-chart"></div>
+        <div class="dash-chart-grid">
+          <div class="card dash-chart-card">
+            <div class="dash-chart-head">
+              <h4>近一周关注机器人用户</h4>
+            </div>
+            <div id="dashFollowChart" class="dash-chart"></div>
+          </div>
+          <div class="card dash-chart-card">
+            <div class="dash-chart-head">
+              <h4>近一周发图数量与人数</h4>
+              <div class="dash-legend">
+                <span><i></i>数量</span>
+                <span><i class="legend-secondary"></i>人数</span>
+              </div>
+            </div>
+            <div id="dashImageChart" class="dash-chart"></div>
+          </div>
         </div>
       </div>
 
@@ -603,8 +625,8 @@ export function adminHtml() {
   }
 
   // Dashboard
-  function renderDashboardChart(series){
-    var container = $("dashChart");
+  function renderBarChart(containerId, series, color){
+    var container = $(containerId);
     if (!container) return;
     if (!series || !series.length) {
       container.innerHTML = '<div class="muted">暂无数据</div>';
@@ -616,25 +638,58 @@ export function adminHtml() {
     }
     if (max === 0) max = 1;
     var width = 1000;
-    var height = 240;
-    var padding = 30;
-    var stepX = (width - padding * 2) / (series.length - 1 || 1);
-    var points = [];
-    for (var j=0;j<series.length;j++){
-      var x = padding + stepX * j;
-      var y = padding + (height - padding * 2) * (1 - (series[j].count / max));
-      points.push(x + "," + y);
-    }
-    var firstLabel = series[0].date || "";
-    var lastLabel = series[series.length - 1].date || "";
+    var height = 220;
+    var padding = 28;
+    var slot = (width - padding * 2) / series.length;
+    var barWidth = slot * 0.6;
     var html = '';
     html += '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none">';
     html += '<line x1="' + padding + '" y1="' + (height - padding) + '" x2="' + (width - padding) + '" y2="' + (height - padding) + '" stroke="#e2e8f0" stroke-width="2" />';
-    html += '<line x1="' + padding + '" y1="' + padding + '" x2="' + padding + '" y2="' + (height - padding) + '" stroke="#e2e8f0" stroke-width="2" />';
-    html += '<polyline fill="none" stroke="#2aabee" stroke-width="3" points="' + points.join(" ") + '" />';
-    html += '<text x="' + padding + '" y="' + (height - 8) + '" fill="#94a3b8" font-size="12">' + firstLabel + '</text>';
-    html += '<text x="' + (width - padding) + '" y="' + (height - 8) + '" fill="#94a3b8" font-size="12" text-anchor="end">' + lastLabel + '</text>';
-    html += '<text x="' + padding + '" y="18" fill="#94a3b8" font-size="12">最高 ' + max + '</text>';
+    for (var j=0;j<series.length;j++){
+      var x = padding + slot * j + (slot - barWidth) / 2;
+      var barHeight = (height - padding * 2) * (series[j].count / max);
+      var y = height - padding - barHeight;
+      html += '<rect x="' + x + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" fill="' + (color || "#2aabee") + '" rx="3" />';
+      html += '<text x="' + (x + barWidth / 2) + '" y="' + (height - 8) + '" fill="#94a3b8" font-size="12" text-anchor="middle">' + (series[j].date || "") + '</text>';
+    }
+    html += '<text x="' + padding + '" y="16" fill="#94a3b8" font-size="12">最高 ' + max + '</text>';
+    html += '</svg>';
+    container.innerHTML = html;
+  }
+
+  function renderDoubleBarChart(containerId, series){
+    var container = $(containerId);
+    if (!container) return;
+    if (!series || !series.length) {
+      container.innerHTML = '<div class="muted">暂无数据</div>';
+      return;
+    }
+    var max = 0;
+    for (var i=0;i<series.length;i++){
+      if (series[i].count > max) max = series[i].count;
+      if (series[i].users > max) max = series[i].users;
+    }
+    if (max === 0) max = 1;
+    var width = 1000;
+    var height = 220;
+    var padding = 28;
+    var slot = (width - padding * 2) / series.length;
+    var barWidth = slot * 0.32;
+    var gap = slot * 0.1;
+    var html = '';
+    html += '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none">';
+    html += '<line x1="' + padding + '" y1="' + (height - padding) + '" x2="' + (width - padding) + '" y2="' + (height - padding) + '" stroke="#e2e8f0" stroke-width="2" />';
+    for (var j=0;j<series.length;j++){
+      var baseX = padding + slot * j + (slot - (barWidth * 2 + gap)) / 2;
+      var barHeightA = (height - padding * 2) * (series[j].count / max);
+      var barHeightB = (height - padding * 2) * (series[j].users / max);
+      var yA = height - padding - barHeightA;
+      var yB = height - padding - barHeightB;
+      html += '<rect x="' + baseX + '" y="' + yA + '" width="' + barWidth + '" height="' + barHeightA + '" fill="#2aabee" rx="3" />';
+      html += '<rect x="' + (baseX + barWidth + gap) + '" y="' + yB + '" width="' + barWidth + '" height="' + barHeightB + '" fill="#94a3b8" rx="3" />';
+      html += '<text x="' + (padding + slot * j + slot / 2) + '" y="' + (height - 8) + '" fill="#94a3b8" font-size="12" text-anchor="middle">' + (series[j].date || "") + '</text>';
+    }
+    html += '<text x="' + padding + '" y="16" fill="#94a3b8" font-size="12">最高 ' + max + '</text>';
     html += '</svg>';
     container.innerHTML = html;
   }
@@ -646,15 +701,16 @@ export function adminHtml() {
       html += '<div class="dash-grid">';
       html += '<div class="card dash-card" data-target="users" style="cursor:pointer"><div class="pill">全部用户</div><h2 class="dash-value">' + d.total_users + '</h2></div>';
       html += '<div class="card dash-card" data-target="members" style="cursor:pointer"><div class="pill">会员用户</div><h2 class="dash-value">' + d.members + '</h2></div>';
-      html += '<div class="card dash-card" data-target="members" style="cursor:pointer"><div class="pill">即将到期（7天）</div><h2 class="dash-value">' + d.expiring_7d + '</h2></div>';
+      html += '<div class="card dash-card" data-target="members" style="cursor:pointer"><div class="pill">即将到期</div><h2 class="dash-value">' + d.expiring_7d + '</h2></div>';
       html += '<div class="card dash-card" data-target="members" style="cursor:pointer"><div class="pill">过期会员</div><h2 class="dash-value">' + d.expired + '</h2></div>';
-      html += '<div class="card dash-card"><div class="pill">今日关注</div><h2 class="dash-value">' + d.today_follow + '</h2></div>';
-      html += '<div class="card dash-card"><div class="pill">昨日关注</div><h2 class="dash-value">' + d.yesterday_follow + '</h2></div>';
       html += '<div class="card dash-card"><div class="pill">本周关注</div><h2 class="dash-value">' + d.week_follow + '</h2></div>';
-      html += '<div class="card dash-card"><div class="pill">上周关注</div><h2 class="dash-value">' + d.last_week_follow + '</h2></div>';
+      html += '<div class="card dash-card"><div class="pill">本月关注</div><h2 class="dash-value">' + d.month_follow + '</h2></div>';
+      html += '<div class="card dash-card"><div class="pill">本周搜图</div><h2 class="dash-value">' + d.week_images + '</h2></div>';
+      html += '<div class="card dash-card"><div class="pill">本月搜图</div><h2 class="dash-value">' + d.month_images + '</h2></div>';
       html += '</div>';
       $("dash").innerHTML = html;
-      renderDashboardChart(d.daily_users || []);
+      renderBarChart("dashFollowChart", d.weekly_follow_series || []);
+      renderDoubleBarChart("dashImageChart", d.weekly_image_series || []);
       var codes = $("dash").querySelectorAll("[data-target]");
       for (var i=0;i<codes.length;i++){
         codes[i].onclick = function(){
@@ -664,8 +720,10 @@ export function adminHtml() {
       }
     }catch(e){
       $("dash").textContent = "请先登录。";
-      var chart = $("dashChart");
-      if (chart) chart.innerHTML = "";
+      var followChart = $("dashFollowChart");
+      if (followChart) followChart.innerHTML = "";
+      var imageChart = $("dashImageChart");
+      if (imageChart) imageChart.innerHTML = "";
     }
   }
 
@@ -1579,7 +1637,6 @@ export async function adminApi(env, req, pathname) {
     const tz = env.TZ || "Asia/Shanghai";
     const todayStart = getTzDayStart(now, tz);
     const tomorrowStart = todayStart + 86400;
-    const yesterdayStart = todayStart - 86400;
     const weekStart = getTzWeekStart(now, tz);
     const nextWeekStart = weekStart + 7 * 86400;
     const lastWeekStart = weekStart - 7 * 86400;
@@ -1588,30 +1645,52 @@ export async function adminApi(env, req, pathname) {
     const members = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM memberships WHERE expire_at > ?`).bind(now).first()).c;
     const expiring_7d = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM memberships WHERE expire_at BETWEEN ? AND ?`).bind(now, now + 7 * 86400).first()).c;
     const expired = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM memberships WHERE expire_at <= ?`).bind(now).first()).c;
-    const today_follow = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE first_seen_at BETWEEN ? AND ?`).bind(todayStart, tomorrowStart).first()).c;
-    const today_unsub = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE can_dm=0 AND last_seen_at BETWEEN ? AND ?`).bind(todayStart, tomorrowStart).first()).c;
-    const yesterday_follow = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE first_seen_at BETWEEN ? AND ?`).bind(yesterdayStart, todayStart).first()).c;
-    const yesterday_unsub = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE can_dm=0 AND last_seen_at BETWEEN ? AND ?`).bind(yesterdayStart, todayStart).first()).c;
     const week_follow = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE first_seen_at BETWEEN ? AND ?`).bind(weekStart, nextWeekStart).first()).c;
     const week_unsub = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE can_dm=0 AND last_seen_at BETWEEN ? AND ?`).bind(weekStart, nextWeekStart).first()).c;
     const last_week_follow = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE first_seen_at BETWEEN ? AND ?`).bind(lastWeekStart, weekStart).first()).c;
     const last_week_unsub = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE can_dm=0 AND last_seen_at BETWEEN ? AND ?`).bind(lastWeekStart, weekStart).first()).c;
-    const monthStart = todayStart - 29 * 86400;
-    const monthRows = await getDb(env).prepare(
+    const tzParts = getTzParts(new Date(now * 1000), tz);
+    const monthStart = todayStart - (tzParts.day - 1) * 86400;
+    const month_follow = (await getDb(env).prepare(`SELECT COUNT(*) AS c FROM users WHERE first_seen_at BETWEEN ? AND ?`).bind(monthStart, tomorrowStart).first()).c;
+    const weekSeriesStart = todayStart - 6 * 86400;
+    const weekRows = await getDb(env).prepare(
       `SELECT first_seen_at FROM users WHERE first_seen_at BETWEEN ? AND ?`
-    ).bind(monthStart, tomorrowStart - 1).all();
-    const monthBuckets = {};
-    for (const row of (monthRows.results || [])) {
+    ).bind(weekSeriesStart, tomorrowStart - 1).all();
+    const weekBuckets = {};
+    for (const row of (weekRows.results || [])) {
       const key = getTzDateKey(row.first_seen_at, tz);
-      monthBuckets[key] = (monthBuckets[key] || 0) + 1;
+      weekBuckets[key] = (weekBuckets[key] || 0) + 1;
     }
-    const daily_users = [];
-    for (let i = 0; i < 30; i++) {
-      const dayStart = monthStart + i * 86400;
+    const weekly_follow_series = [];
+    for (let i = 0; i < 7; i++) {
+      const dayStart = weekSeriesStart + i * 86400;
       const key = getTzDateKey(dayStart, tz);
       const labelParts = key.split("-");
       const label = `${labelParts[1]}-${labelParts[2]}`;
-      daily_users.push({ date: label, count: monthBuckets[key] || 0 });
+      weekly_follow_series.push({ date: label, count: weekBuckets[key] || 0 });
+    }
+    const kv = getKv(env);
+    let week_images = 0;
+    let month_images = 0;
+    const weekly_image_series = [];
+    for (let i = 0; i < 7; i++) {
+      const dayStart = weekSeriesStart + i * 86400;
+      const key = getTzDateKey(dayStart, tz);
+      const dayTotal = Number(await kv.get(`image_total:${key}`) || 0);
+      const dayUsers = Number(await kv.get(`image_user_total:${key}`) || 0);
+      const labelParts = key.split("-");
+      const label = `${labelParts[1]}-${labelParts[2]}`;
+      weekly_image_series.push({ date: label, count: dayTotal, users: dayUsers });
+    }
+    const weekDays = Math.max(0, Math.floor((tomorrowStart - weekStart) / 86400));
+    for (let i = 0; i < weekDays; i++) {
+      const key = getTzDateKey(weekStart + i * 86400, tz);
+      week_images += Number(await kv.get(`image_total:${key}`) || 0);
+    }
+    const monthDays = Math.max(0, Math.floor((tomorrowStart - monthStart) / 86400));
+    for (let i = 0; i < monthDays; i++) {
+      const key = getTzDateKey(monthStart + i * 86400, tz);
+      month_images += Number(await kv.get(`image_total:${key}`) || 0);
     }
     return new Response(JSON.stringify({
       ok:true,
@@ -1619,15 +1698,15 @@ export async function adminApi(env, req, pathname) {
       members,
       expiring_7d,
       expired,
-      today_follow,
-      today_unsub,
       week_follow,
       week_unsub,
-      yesterday_follow,
-      yesterday_unsub,
       last_week_follow,
       last_week_unsub,
-      daily_users
+      month_follow,
+      week_images,
+      month_images,
+      weekly_follow_series,
+      weekly_image_series
     }), { headers: JSON_HEADERS });
   }
 

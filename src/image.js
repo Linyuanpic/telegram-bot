@@ -87,10 +87,22 @@ export async function checkDailyImageLimit(env, userId) {
   const member = await isMember(env, userId);
   const limit = member ? IMAGE_DAILY_LIMIT_MEMBER : IMAGE_DAILY_LIMIT_NON_MEMBER;
   const dayKey = getTzDateKey(nowSec(), env.TZ);
+  const kv = getKv(env);
   const key = `image_count:${dayKey}:${userId}`;
-  const current = Number(await getKv(env).get(key) || 0);
+  const current = Number(await kv.get(key) || 0);
   if (current >= limit) return { allowed: false, current, limit, member };
-  await getKv(env).put(key, String(current + 1), { expirationTtl: 2 * 86400 });
+  await kv.put(key, String(current + 1), { expirationTtl: 2 * 86400 });
+  const totalKey = `image_total:${dayKey}`;
+  const total = Number(await kv.get(totalKey) || 0);
+  await kv.put(totalKey, String(total + 1), { expirationTtl: 40 * 86400 });
+  const userKey = `image_user:${dayKey}:${userId}`;
+  const seen = await kv.get(userKey);
+  if (!seen) {
+    await kv.put(userKey, "1", { expirationTtl: 40 * 86400 });
+    const userTotalKey = `image_user_total:${dayKey}`;
+    const userTotal = Number(await kv.get(userTotalKey) || 0);
+    await kv.put(userTotalKey, String(userTotal + 1), { expirationTtl: 40 * 86400 });
+  }
   return { allowed: true, current: current + 1, limit, member };
 }
 
