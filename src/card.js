@@ -90,7 +90,6 @@ export async function redeemCardCode(env, userId, code) {
     const baseExpire = wasMember ? previous.expire_at : t;
     newExpire = baseExpire + codeRow.days * 86400;
 
-    await db.prepare("BEGIN").run();
     const claimResult = await db
       .prepare(
         `UPDATE codes
@@ -101,7 +100,6 @@ export async function redeemCardCode(env, userId, code) {
       .run();
     const claimChanges = claimResult?.meta?.changes || 0;
     if (claimChanges !== 1) {
-      await db.prepare("ROLLBACK").run();
       return { ok: false, reason: "used" };
     }
 
@@ -115,13 +113,7 @@ export async function redeemCardCode(env, userId, code) {
       )
       .bind(userId, t, newExpire, t)
       .run();
-    await db.prepare("COMMIT").run();
   } catch (e) {
-    try {
-      await db.prepare("ROLLBACK").run();
-    } catch {
-      // ignore rollback errors
-    }
     console.error("D1 error", e);
     return { ok: false, reason: "db_unavailable" };
   }
