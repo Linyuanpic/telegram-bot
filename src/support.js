@@ -24,7 +24,6 @@ import {
   buildSignedProxyUrl,
   checkDailyImageLimit,
   getTelegramFilePath,
-  hasVideoWarning,
   shouldNotifyImageLimit,
   shouldNotifyMediaGroup,
   shouldNotifyVideoWarning,
@@ -2393,10 +2392,6 @@ export async function handleWebhook(env, update, origin) {
     return;
   }
 
-  if (await hasVideoWarning(env, userId)) {
-    return;
-  }
-
   const imageInfo = getMessageImageInfo(msg);
   if (imageInfo) {
     const limitCheck = await checkDailyImageLimit(env, userId);
@@ -2449,6 +2444,7 @@ export async function handleWebhook(env, update, origin) {
     if (text) {
       const code = extractCardCode(text);
       if (!code || !isLikelyCardCode(code)) {
+        await setAwaitingCode(env, userId, false);
         await tgCall(env, "sendMessage", { chat_id: userId, text: "卡密验证失败！请检查卡密是否输入正确。" });
         return;
       }
