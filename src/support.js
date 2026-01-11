@@ -2694,6 +2694,13 @@ export async function handleWebhook(env, update, requestUrl) {
     return;
   }
 
+  const trimmedText = text.trim();
+  const detectedCode = extractCardCode(text);
+  if (detectedCode && isLikelyCardCode(detectedCode) && !trimmedText.startsWith("/")) {
+    await handleCardRedeem(env, userId, detectedCode);
+    return;
+  }
+
   if (msg.media_group_id && hasImageContent(msg)) {
     if (await shouldNotifyMediaGroup(env, msg.media_group_id)) {
       await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片进行搜索哦～" });
