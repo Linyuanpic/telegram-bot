@@ -2473,6 +2473,20 @@ export async function handleWebhook(env, update, requestUrl) {
       }
       return;
     }
+    if (data === "/start" || data === "START") {
+      await ensureBotCommands(env);
+      const tpl = await getTemplate(env, "start");
+      if (!tpl) throw new Error("Missing template: start");
+      const buttons = appendFixedStartButtons(tpl.buttons);
+      await trySendMessage(env, userId, {
+        chat_id: userId,
+        text: tpl.text,
+        parse_mode: tpl.parse_mode,
+        disable_web_page_preview: tpl.disable_preview,
+        reply_markup: buildKeyboard(buttons),
+      });
+      return;
+    }
     if (data === "SUPPORT") {
       if (await isSupportBlocked(env, userId)) {
         await tgCall(env, "sendMessage", { chat_id: chatId, text: "你已被管理员屏蔽使用人工客服，请稍后再试。" });
@@ -2483,7 +2497,7 @@ export async function handleWebhook(env, update, requestUrl) {
         if (spamTpl) {
           await sendTemplate(env, chatId, "support_closed_spam");
         } else {
-          await tgCall(env, "sendMessage", { chat_id: chatId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
+          await tgCall(env, "sendMessage", { chat_id: chatId, text: "消息发送失败，请于1小时后再来尝试。" });
         }
         return;
       }
@@ -2594,7 +2608,7 @@ export async function handleWebhook(env, update, requestUrl) {
       if (spamTpl) {
         await sendTemplate(env, userId, "support_closed_spam");
       } else {
-        await tgCall(env, "sendMessage", { chat_id: userId, text: "请不要刷屏！消息发送失败，请于1小时后再来尝试。" });
+        await tgCall(env, "sendMessage", { chat_id: userId, text: "消息发送失败，请于1小时后再来尝试。" });
       }
       return;
     }
@@ -2678,9 +2692,9 @@ export async function handleWebhook(env, update, requestUrl) {
         if (limitTpl) {
           await sendTemplate(env, userId, limitTpl.key);
         } else if (limitCheck.member) {
-          await tgCall(env, "sendMessage", { chat_id: userId, text: "谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试哦～" });
+          await tgCall(env, "sendMessage", { chat_id: userId, text: "谢谢您的支持，为防止机器人被人恶意爆刷，请于明天再来尝试搜索哦～" });
         } else {
-          await tgCall(env, "sendMessage", { chat_id: userId, text: "普通用户每日只限搜索10张图片，想要搜索更多就加入打赏群成为会员吧～" });
+          await tgCall(env, "sendMessage", { chat_id: userId, text: "为了能长期运营下去，普通用户每日搜图上限为5张，想要尽情搜索，就请加入打赏群哦～" });
         }
       }
       return;

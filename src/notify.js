@@ -8,6 +8,7 @@ export async function processAutoRules(env) {
   const t = nowSec();
 
   for (const rule of items) {
+    if (rule.kind === "nonmember_monthly") continue;
     const isExpireTodayRule = rule.kind === "nonmember_monthly";
     // exp_before / exp_after / expire_today
     const offsetSec = isExpireTodayRule ? 0 : rule.offset_days * 86400;

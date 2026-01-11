@@ -151,8 +151,8 @@ export async function handleCardRedeem(env, userId, code) {
     const tplKey = result.wasMember ? "vip_renew" : "vip_new";
     const tpl = await getTemplate(env, tplKey);
     const fallbackText = result.wasMember
-      ? "尊贵的VIP用户，您的会员时长已叠加！可点击下方按钮申请加入打赏群/频道！"
-      : "您已成为尊贵的VIP用户，可点击下方按钮申请加入打赏群/频道！";
+      ? "您的会员时长已叠加！可点击下方按钮尽情享用会员内容哦～"
+      : "您已成为尊贵的vip用户，可点击下方按钮加入打赏群！";
     const msgText = renderTemplateText(tpl?.text || fallbackText, { expire_at: fmtDateTime(result.expire_at, env.TZ) });
     await trySendMessage(env, userId, {
       chat_id: userId,

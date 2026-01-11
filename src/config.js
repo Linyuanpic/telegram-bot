@@ -41,7 +41,7 @@ export const IMAGE_PROXY_RATE_WINDOW = 60;
 export const FILE_PATH_CACHE_TTL = 7 * 24 * 3600;
 export const CARD_CODE_LENGTH = 18;
 export const IMAGE_DAILY_LIMIT_MEMBER = 100;
-export const IMAGE_DAILY_LIMIT_NON_MEMBER = 10;
+export const IMAGE_DAILY_LIMIT_NON_MEMBER = 5;
 export const SUPPORT_SPAM_BAN_TTL_SEC = 60 * 60;
 export const WEEKDAY_INDEX = {
   Sun: 7,
