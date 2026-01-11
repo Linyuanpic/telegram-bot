@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { getKv } from "./kv.js";
-import { tgCall } from "./telegram.js";
+import { sendTemplate, tgCall } from "./telegram.js";
 import { nowSec } from "./utils.js";
 
 /** Generate join-request links for all enabled managed chats */
@@ -37,7 +37,7 @@ export async function buildApplyButtonsFromChats(env, chats) {
   const rows = [];
   for (const c of chats) {
     const link = await ensureJoinRequestLink(env, c.chat_id);
-    rows.push([{ text: c.title ? `申请加入：${c.title}` : `申请加入 ${c.chat_id}`, type: "url", url: link }]);
+    rows.push([{ text: c.title || String(c.chat_id), type: "url", url: link }]);
   }
   return rows;
 }
@@ -51,6 +51,7 @@ export async function buildApplyButtonsForChat(env, chatId) {
 export async function kickExpired(env) {
   // remove users expired from all managed chats where they were approved by bot
   const t = nowSec();
+  const notifiedUsers = new Set();
   const rows = await getDb(env).prepare(
     `SELECT uc.user_id, uc.chat_id
      FROM user_chats uc
@@ -66,6 +67,17 @@ export async function kickExpired(env) {
       await tgCall(env, "banChatMember", { chat_id: r.chat_id, user_id: r.user_id, until_date: t + 30 });
       await tgCall(env, "unbanChatMember", { chat_id: r.chat_id, user_id: r.user_id, only_if_banned: true });
       await getDb(env).prepare(`UPDATE user_chats SET removed_at=? WHERE user_id=? AND chat_id=?`).bind(t, r.user_id, r.chat_id).run();
+      if (!notifiedUsers.has(r.user_id)) {
+        notifiedUsers.add(r.user_id);
+        const user = await getDb(env).prepare(`SELECT can_dm FROM users WHERE user_id=?`).bind(r.user_id).first();
+        if (user?.can_dm === 1) {
+          try {
+            await sendTemplate(env, r.user_id, "nonmember_monthly");
+          } catch {
+            // ignore send failures
+          }
+        }
+      }
       await new Promise(res => setTimeout(res, 200));
     } catch {
       // ignore; could be missing permissions
