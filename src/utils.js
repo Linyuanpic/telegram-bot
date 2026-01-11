@@ -128,6 +128,10 @@ export function renderButtonsWithVars(buttons, vars) {
   }).filter(row => row.length);
 }
 
+export function normalizeTelegramHtml(text) {
+  return String(text || "").replace(/<br\s*\/?>/gi, "\n");
+}
+
 export function escapeHtmlText(text) {
   return String(text || "")
     .replace(/&/g, "&amp;")
