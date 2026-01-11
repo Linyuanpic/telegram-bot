@@ -18,6 +18,7 @@ import {
   buildImageSearchLinks,
   buildSignedProxyUrl,
   checkDailyImageLimit,
+  recordDailyImageReminder,
   getTelegramFilePath,
   shouldNotifyImageLimit,
   shouldNotifyMediaGroup,
@@ -2086,7 +2087,10 @@ export async function adminApi(env, req, pathname) {
     if (!url.startsWith("https://")) {
       return new Response(JSON.stringify({ ok:false, error:"Webhook 必须使用 https://" }), { status: 400, headers: JSON_HEADERS });
     }
-    await tgCall(env, "setWebhook", { url });
+    await tgCall(env, "setWebhook", {
+      url,
+      allowed_updates: ["message", "callback_query", "chat_join_request", "chat_member", "my_chat_member"],
+    });
     return new Response(JSON.stringify({ ok:true, url }), { headers: JSON_HEADERS });
   }
 
@@ -2878,7 +2882,8 @@ export async function handleWebhook(env, update, requestUrl) {
   }
 
   if (msg.media_group_id) {
-    if (await shouldNotifyMediaGroup(env, userId)) {
+    if (await shouldNotifyMediaGroup(env, userId, msg.media_group_id)) {
+      await recordDailyImageReminder(env, userId);
       await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片进行搜索哦～" });
     }
     return;
@@ -2886,6 +2891,7 @@ export async function handleWebhook(env, update, requestUrl) {
 
   if (isVideoMessage(msg)) {
     if (await shouldNotifyVideoWarning(env, userId)) {
+      await recordDailyImageReminder(env, userId);
       await tgCall(env, "sendMessage", { chat_id: userId, text: "本机器人只支持图片搜索哦～" });
     }
     return;

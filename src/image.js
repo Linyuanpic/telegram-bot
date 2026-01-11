@@ -121,6 +121,14 @@ export async function checkDailyImageLimit(env, userId) {
   const current = Number(await kv.get(key) || 0);
   if (current >= limit) return { allowed: false, current, limit, member };
   await kv.put(key, String(current + 1), { expirationTtl: 2 * 86400 });
+  await recordDailyImageStats(env, userId);
+  return { allowed: true, current: current + 1, limit, member };
+}
+
+export async function recordDailyImageStats(env, userId) {
+  if (!userId) return;
+  const dayKey = getTzDateKey(nowSec(), env.TZ);
+  const kv = getKv(env);
   const totalKey = `image_total:${dayKey}`;
   const total = Number(await kv.get(totalKey) || 0);
   await kv.put(totalKey, String(total + 1), { expirationTtl: 40 * 86400 });
@@ -132,7 +140,16 @@ export async function checkDailyImageLimit(env, userId) {
     const userTotal = Number(await kv.get(userTotalKey) || 0);
     await kv.put(userTotalKey, String(userTotal + 1), { expirationTtl: 40 * 86400 });
   }
-  return { allowed: true, current: current + 1, limit, member };
+}
+
+export async function recordDailyImageReminder(env, userId) {
+  if (!userId) return;
+  const dayKey = getTzDateKey(nowSec(), env.TZ);
+  const kv = getKv(env);
+  const key = `image_count:${dayKey}:${userId}`;
+  const current = Number(await kv.get(key) || 0);
+  await kv.put(key, String(current + 1), { expirationTtl: 2 * 86400 });
+  await recordDailyImageStats(env, userId);
 }
 
 export async function shouldNotifyImageLimit(env, userId, tier) {
@@ -159,13 +176,19 @@ export async function hasVideoWarning(env, userId) {
   return !!(await getKv(env).get(key));
 }
 
-export async function shouldNotifyMediaGroup(env, userId) {
+export async function shouldNotifyMediaGroup(env, userId, mediaGroupId = "") {
   if (!userId) return true;
   const dayKey = getTzDateKey(nowSec(), env.TZ);
   const key = `media_group_warn:${dayKey}:${userId}`;
   const kv = getKv(env);
   const warned = await kv.get(key);
   if (warned) return false;
+  if (mediaGroupId) {
+    const groupKey = `media_group_warn:${dayKey}:${userId}:${mediaGroupId}`;
+    const groupWarned = await kv.get(groupKey);
+    if (groupWarned) return false;
+    await kv.put(groupKey, "1", { expirationTtl: 2 * 86400 });
+  }
   await kv.put(key, "1", { expirationTtl: 2 * 86400 });
   return true;
 }
