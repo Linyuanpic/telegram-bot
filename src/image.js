@@ -159,13 +159,14 @@ export async function hasVideoWarning(env, userId) {
   return !!(await getKv(env).get(key));
 }
 
-export async function shouldNotifyMediaGroup(env, groupId) {
-  if (!groupId) return true;
-  const key = `media_group_warn:${groupId}`;
+export async function shouldNotifyMediaGroup(env, userId) {
+  if (!userId) return true;
+  const dayKey = getTzDateKey(nowSec(), env.TZ);
+  const key = `media_group_warn:${dayKey}:${userId}`;
   const kv = getKv(env);
   const warned = await kv.get(key);
   if (warned) return false;
-  await kv.put(key, "1", { expirationTtl: 120 });
+  await kv.put(key, "1", { expirationTtl: 2 * 86400 });
   return true;
 }
 

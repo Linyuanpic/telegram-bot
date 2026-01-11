@@ -1,6 +1,6 @@
 import { getTemplate, setCanDm } from "./db.js";
 import { getKv } from "./kv.js";
-import { buildKeyboard, renderTemplateText } from "./utils.js";
+import { buildKeyboard, normalizeTelegramHtml, renderTemplateText } from "./utils.js";
 
 function isTelegramMockEnabled(env) {
   const v = env?.MOCK_TELEGRAM;
@@ -40,7 +40,7 @@ export async function tgCall(env, method, payload) {
 export async function sendTemplate(env, chatId, templateKey, extra = {}) {
   const tpl = await getTemplate(env, templateKey);
   if (!tpl) throw new Error(`Template not found: ${templateKey}`);
-  const text = renderTemplateText(tpl.text, extra.vars || {});
+  const text = normalizeTelegramHtml(renderTemplateText(tpl.text, extra.vars || {}));
   const buttons = extra.buttonsOverride ?? tpl.buttons;
   const payload = {
     chat_id: chatId,

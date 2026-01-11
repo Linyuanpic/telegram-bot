@@ -36,9 +36,9 @@ import {
   getTzDateKey,
   getTzDayStart,
   getTzWeekStart,
-  hasImageContent,
   isPrivateChat,
   isVideoMessage,
+  normalizeTelegramHtml,
   nowSec,
   parseAdminIds,
   randCode,
@@ -1929,7 +1929,7 @@ export async function adminApi(env, req, pathname) {
 
   if (pathname === "/api/admin/templates/preview" && req.method === "POST") {
     const body = await req.json();
-    const text = String(body.text || "");
+    const text = normalizeTelegramHtml(String(body.text || ""));
     const buttons = Array.isArray(body.buttons) ? body.buttons : [];
     const disablePreview = Number(body.disable_preview || 0) ? true : false;
     const payload = {
@@ -2507,7 +2507,7 @@ export async function handleWebhook(env, update, requestUrl) {
       const buttons = appendFixedStartButtons(tpl.buttons);
       await trySendMessage(env, userId, {
         chat_id: userId,
-        text: tpl.text,
+        text: normalizeTelegramHtml(tpl.text),
         parse_mode: tpl.parse_mode,
         disable_web_page_preview: tpl.disable_preview,
         reply_markup: buildKeyboard(buttons),
@@ -2686,7 +2686,7 @@ export async function handleWebhook(env, update, requestUrl) {
     const buttons = appendFixedStartButtons(tpl.buttons);
     await trySendMessage(env, userId, {
       chat_id: userId,
-      text: tpl.text,
+      text: normalizeTelegramHtml(tpl.text),
       parse_mode: tpl.parse_mode,
       disable_web_page_preview: tpl.disable_preview,
       reply_markup: buildKeyboard(buttons),
@@ -2694,8 +2694,8 @@ export async function handleWebhook(env, update, requestUrl) {
     return;
   }
 
-  if (msg.media_group_id && hasImageContent(msg)) {
-    if (await shouldNotifyMediaGroup(env, msg.media_group_id)) {
+  if (msg.media_group_id) {
+    if (await shouldNotifyMediaGroup(env, userId)) {
       await tgCall(env, "sendMessage", { chat_id: userId, text: "请发送一张图片进行搜索哦～" });
     }
     return;
@@ -2731,11 +2731,11 @@ export async function handleWebhook(env, update, requestUrl) {
       const imageUrl = await buildSignedProxyUrl(env, requestUrlString, imageInfo.fileId, userId);
       const links = buildImageSearchLinks(imageUrl);
       const tpl = await getTemplate(env, IMAGE_REPLY_TEMPLATE_KEY);
-      const replyText = renderTemplateText(tpl?.text || IMAGE_REPLY_DEFAULT_TEXT, {
+      const replyText = normalizeTelegramHtml(renderTemplateText(tpl?.text || IMAGE_REPLY_DEFAULT_TEXT, {
         image_url: imageUrl,
         google_lens: links.google,
         yandex: links.yandex
-      });
+      }));
       const replyButtons = renderButtonsWithVars(tpl?.buttons || IMAGE_REPLY_DEFAULT_BUTTONS, {
         image_url: imageUrl,
         google_lens: links.google,
@@ -2762,7 +2762,7 @@ export async function handleWebhook(env, update, requestUrl) {
       if (cmdTpl) {
         await trySendMessage(env, userId, {
           chat_id: userId,
-          text: cmdTpl.text,
+          text: normalizeTelegramHtml(cmdTpl.text),
           parse_mode: cmdTpl.parse_mode,
           disable_web_page_preview: cmdTpl.disable_preview,
           reply_markup: cmdTpl.buttons?.length ? buildKeyboard(cmdTpl.buttons) : undefined,
