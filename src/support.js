@@ -473,6 +473,7 @@ export function adminHtml() {
         <a href="#broadcast" id="nav-broadcast">广播中心</a>
         <a href="#codes" id="nav-codes">卡密管理</a>
         <a href="#support" id="nav-support">客服会话</a>
+        <a href="#chats" id="nav-chats">群组管理</a>
         <a href="#members" id="nav-members">会员管理</a>
         <a href="#users" id="nav-users">用户管理</a>
       </nav>
@@ -669,6 +670,50 @@ export function adminHtml() {
         <div id="supportPagination" class="pagination"></div>
       </div>
 
+      <div class="card hidden" id="view-chats">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <h3 style="margin:0">群组管理</h3>
+        </div>
+        <div class="chat-edit-grid" style="margin-top:8px">
+          <div class="field">
+            <label>群组/频道 ID</label>
+            <input id="chatIdInput" placeholder="-100xxxx" />
+          </div>
+          <div class="field">
+            <label>类型</label>
+            <select id="chatTypeInput">
+              <option value="group">群组</option>
+              <option value="channel">频道</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>名称</label>
+            <input id="chatTitleInput" placeholder="展示名称" />
+          </div>
+          <div class="field">
+            <label>状态</label>
+            <select id="chatEnabledInput">
+              <option value="1">启用</option>
+              <option value="0">停用</option>
+            </select>
+          </div>
+          <div class="chat-edit-actions">
+            <button class="action-btn" id="chatSave">保存</button>
+            <button class="gray action-btn" id="chatReset">清空</button>
+          </div>
+        </div>
+        <p class="muted" id="chatMsg"></p>
+        <div class="row row-between" style="margin-top:6px">
+          <div style="flex:1;min-width:220px">
+            <input id="chatSearch" placeholder="搜索群 ID / 名称" />
+          </div>
+          <div class="toolbar">
+            <button class="gray action-btn" id="chatRefresh">刷新</button>
+          </div>
+        </div>
+        <div id="chatTable"></div>
+      </div>
+
       <div class="card hidden" id="view-members">
         <div class="row" style="justify-content:space-between;align-items:center">
           <h3 style="margin:0">会员管理</h3>
@@ -699,7 +744,7 @@ export function adminHtml() {
 
 <script>
   function $(id){ return document.getElementById(id); }
-  var views = ["login","dashboard","templates","template-editor","broadcast","codes","support","members","users"];
+  var views = ["login","dashboard","templates","template-editor","broadcast","codes","support","chats","members","users"];
   var IMAGE_REPLY_TEMPLATE_KEY = ${JSON.stringify(IMAGE_REPLY_TEMPLATE_KEY)};
   var IMAGE_REPLY_DEFAULT_TEXT = ${JSON.stringify(IMAGE_REPLY_DEFAULT_TEXT)};
   var IMAGE_REPLY_DEFAULT_BUTTONS = ${JSON.stringify(IMAGE_REPLY_DEFAULT_BUTTONS)};
@@ -717,6 +762,7 @@ export function adminHtml() {
     if(name==="codes") loadCodes();
     if(name==="broadcast") { loadBroadcastJobs(); loadAutoRules(); }
     if(name==="support") loadSupport();
+    if(name==="chats") loadChats();
     if(name==="members") loadMembers();
     if(name==="users") loadUsers();
     if(name==="login") { startLogin(); }
@@ -1372,6 +1418,143 @@ export function adminHtml() {
       alert("删除失败：" + e.message);
     }
   }
+
+  // Chats
+  var chatList = [];
+  var chatMap = {};
+
+  function renderChatTable(list){
+    var rows = "";
+    for (var i=0;i<list.length;i++){
+      var c = list[i];
+      rows += '<tr>';
+      rows += '<td><b>' + escapeHtml(String(c.chat_id)) + '</b></td>';
+      rows += '<td class="center">' + (c.chat_type === "channel" ? "频道" : "群组") + '</td>';
+      rows += '<td>' + escapeHtml(c.title || "") + '</td>';
+      rows += '<td class="center">' + (c.is_enabled ? '<span class="pill">启用</span>' : '<span class="pill" style="background:#fee2e2;color:#991b1b">停用</span>') + '</td>';
+      rows += '<td>' + escapeHtml(c.created_at || "") + '</td>';
+      rows += '<td class="col-actions">';
+      rows += '<button class="gray action-btn" data-edit="' + escapeHtml(String(c.chat_id)) + '">编辑</button> ';
+      rows += '<button class="action-btn" data-toggle="' + escapeHtml(String(c.chat_id)) + '">'+ (c.is_enabled ? "停用" : "启用") +'</button> ';
+      rows += '<button class="red action-btn" data-del="' + escapeHtml(String(c.chat_id)) + '">删除</button>';
+      rows += '</td>';
+      rows += '</tr>';
+    }
+    $("chatTable").innerHTML = '<table class="table-edge center-2-4"><thead><tr><th>群ID</th><th>类型</th><th>名称</th><th>状态</th><th>创建时间</th><th class="col-actions">操作</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    var editBtns = $("chatTable").querySelectorAll("button[data-edit]");
+    for (var j=0;j<editBtns.length;j++){
+      editBtns[j].onclick = function(){
+        var chatId = this.getAttribute("data-edit");
+        var chat = chatMap[chatId];
+        if (chat) fillChatForm(chat);
+      };
+    }
+    var toggleBtns = $("chatTable").querySelectorAll("button[data-toggle]");
+    for (var k=0;k<toggleBtns.length;k++){
+      toggleBtns[k].onclick = function(){
+        var chatId = this.getAttribute("data-toggle");
+        var chat = chatMap[chatId];
+        if (chat) toggleChat(chat);
+      };
+    }
+    var delBtns = $("chatTable").querySelectorAll("button[data-del]");
+    for (var m=0;m<delBtns.length;m++){
+      delBtns[m].onclick = function(){
+        var chatId = this.getAttribute("data-del");
+        deleteChat(chatId);
+      };
+    }
+  }
+
+  function fillChatForm(chat){
+    $("chatIdInput").value = chat.chat_id;
+    $("chatTypeInput").value = chat.chat_type || "group";
+    $("chatTitleInput").value = chat.title || "";
+    $("chatEnabledInput").value = chat.is_enabled ? "1" : "0";
+  }
+
+  function resetChatForm(){
+    $("chatIdInput").value = "";
+    $("chatTypeInput").value = "group";
+    $("chatTitleInput").value = "";
+    $("chatEnabledInput").value = "1";
+    $("chatMsg").textContent = "";
+  }
+
+  async function loadChats(){
+    try{
+      var d = await api("/api/admin/chats");
+      chatList = d.items || [];
+      chatMap = {};
+      for (var i=0;i<chatList.length;i++){
+        chatMap[String(chatList[i].chat_id)] = chatList[i];
+      }
+      renderChatTable(chatList);
+    }catch(e){
+      $("chatTable").textContent = "请先登录。";
+    }
+  }
+
+  async function saveChat(){
+    $("chatMsg").textContent = "";
+    var chatId = Number($("chatIdInput").value.trim());
+    if (!Number.isFinite(chatId)) {
+      $("chatMsg").textContent = "群组/频道 ID 无效。";
+      return;
+    }
+    var body = {
+      chat_id: chatId,
+      chat_type: $("chatTypeInput").value,
+      title: $("chatTitleInput").value.trim(),
+      is_enabled: $("chatEnabledInput").value === "1"
+    };
+    try{
+      await api("/api/admin/chats", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+      $("chatMsg").textContent = "已保存群组配置。";
+      await loadChats();
+    }catch(e){
+      $("chatMsg").textContent = "保存失败：" + e.message;
+    }
+  }
+
+  async function toggleChat(chat){
+    try{
+      await api("/api/admin/chats", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({
+        chat_id: chat.chat_id,
+        chat_type: chat.chat_type,
+        title: chat.title || "",
+        is_enabled: !chat.is_enabled
+      }) });
+      await loadChats();
+    }catch(e){
+      alert("更新失败：" + e.message);
+    }
+  }
+
+  async function deleteChat(chatId){
+    if (!confirm("确定删除该群组/频道配置？")) return;
+    try{
+      await api("/api/admin/chats/" + encodeURIComponent(chatId), { method:"DELETE" });
+      await loadChats();
+    }catch(e){
+      alert("删除失败：" + e.message);
+    }
+  }
+
+  $("chatSave").onclick = saveChat;
+  $("chatReset").onclick = resetChatForm;
+  $("chatRefresh").onclick = loadChats;
+  $("chatSearch").oninput = function(){
+    var q = $("chatSearch").value.trim().toLowerCase();
+    if(!q) return renderChatTable(chatList);
+    var filtered = [];
+    for (var i=0;i<chatList.length;i++){
+      var c = chatList[i];
+      var s = String(c.chat_id) + " " + (c.title || "");
+      if (s.toLowerCase().indexOf(q) >= 0) filtered.push(c);
+    }
+    renderChatTable(filtered);
+  };
 
   // Broadcast
   var autoRuleList = [];
