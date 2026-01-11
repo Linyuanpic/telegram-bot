@@ -278,7 +278,7 @@ function buildSupportUserInfoText(profile, isVip, userId) {
   const infoLines = [
     `姓名：${escapeHtmlText(name)}`,
     `用户ID：${userId}`,
-    `用户身份：${isVip ? "会员用户" : "普通用户"}`,
+    `身份：${isVip ? "会员用户" : "普通用户"}`,
     "—————————————",
   ];
   infoLines.push(
