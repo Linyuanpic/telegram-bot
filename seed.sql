@@ -5,7 +5,7 @@ INSERT OR IGNORE INTO templates (key,title,parse_mode,disable_preview,text,butto
 '[
   [
     {"text":"支付宝/微信 购买","type":"url","url":"https://example.com/buy1"},
-    {"text":"支付宝/微信 购买(备用)","type":"url","url":"https://example.com/buy2"}
+    {"text":"支付宝/微信 备用","type":"url","url":"https://example.com/buy2"}
   ]
 ]',
 strftime('%s','now')),
@@ -90,7 +90,7 @@ strftime('%s','now')),
 ]',
 strftime('%s','now')),
   
-('nonmember_monthly','会员到期提醒','HTML',0,'您的会员身份已到期，已将您移出群组。如需继续使用，请购买卡密并完成验证。',
+('nonmember_monthly','会员到期提醒','HTML',0,'您的会员已到期，已被移出打赏群。如需继续使用，请购买卡密并完成验证。',
 '[
   [{"text":"购买卡密","type":"callback","data":"/start"}]
 ]',
