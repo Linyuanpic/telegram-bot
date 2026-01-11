@@ -11,7 +11,10 @@ function isTelegramMockEnabled(env) {
 export async function tgCall(env, method, payload) {
   if (isTelegramMockEnabled(env)) {
     if (method === "createChatInviteLink") {
-      return { invite_link: `https://t.me/+mock_${payload.chat_id}` };
+      return {
+        invite_link: `https://t.me/+mock_${payload.chat_id}`,
+        name: payload?.name || "",
+      };
     }
     if (method === "getFile") {
       return { file_path: "mock/file.jpg" };

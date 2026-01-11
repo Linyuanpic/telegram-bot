@@ -13,6 +13,7 @@ import { ensureUser, getDb, getTemplate } from "./db.js";
 import { getKv } from "./kv.js";
 import { isMember } from "./auth.js";
 import { extractCardCode, handleCardRedeem, isLikelyCardCode } from "./card.js";
+import { ensureVipInviteLink } from "./group.js";
 import {
   buildImageSearchLinks,
   buildSignedProxyUrl,
@@ -2061,6 +2062,13 @@ export async function adminApi(env, req, pathname) {
 
     // clear cached join link if changed
     await getKv(env).delete(`joinlink:${chat_id}`);
+    if (is_enabled === 1) {
+      try {
+        await ensureVipInviteLink(env, chat_id, title);
+      } catch {
+        // ignore invite link errors in admin save
+      }
+    }
     return new Response(JSON.stringify({ ok:true }), { headers: JSON_HEADERS });
   }
 
@@ -2419,8 +2427,27 @@ export async function handleWebhook(env, update, requestUrl) {
   if (joinReq) {
     const chatId = joinReq.chat?.id;
     const userId = joinReq.from?.id;
-    const managed = await getDb(env).prepare(`SELECT chat_id FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
+    const managed = await getDb(env).prepare(`SELECT chat_id,title FROM managed_chats WHERE chat_id=? AND is_enabled=1`).bind(chatId).first();
     if (!managed) return;
+    const inviteName = joinReq.invite_link?.name || "";
+    const inviteLink = joinReq.invite_link?.invite_link || "";
+    await getDb(env).prepare(
+      `INSERT INTO join_request_logs(user_id,chat_id,invite_name,invite_link,requested_at)
+       VALUES (?,?,?,?,?)`
+    ).bind(userId, chatId, inviteName, inviteLink, nowSec()).run();
+
+    let vipInvite;
+    try {
+      vipInvite = await ensureVipInviteLink(env, chatId, managed.title || joinReq.chat?.title || "");
+    } catch {
+      vipInvite = null;
+    }
+    const linkMatches = inviteLink && vipInvite?.invite_link && inviteLink === vipInvite.invite_link;
+    const nameMatches = !inviteLink && inviteName && vipInvite?.name && inviteName === vipInvite.name;
+    if (!linkMatches && !nameMatches) {
+      await tgCall(env, "declineChatJoinRequest", { chat_id: chatId, user_id: userId });
+      return;
+    }
 
     const memberOk = await isMember(env, userId);
     if (memberOk) {
