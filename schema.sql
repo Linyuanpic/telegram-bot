@@ -59,6 +59,18 @@ CREATE TABLE IF NOT EXISTS user_chats (
   FOREIGN KEY(chat_id) REFERENCES managed_chats(chat_id) ON DELETE CASCADE
 );
 
+-- Join request audit logs
+CREATE TABLE IF NOT EXISTS join_request_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  invite_name TEXT NOT NULL,
+  invite_link TEXT NOT NULL,
+  requested_at INTEGER NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+  FOREIGN KEY(chat_id) REFERENCES managed_chats(chat_id) ON DELETE CASCADE
+);
+
 -- Message templates (HTML parse mode by default)
 -- buttons_json is a 2D array of rows: [[{text,type,url,data}], ...]
 CREATE TABLE IF NOT EXISTS templates (

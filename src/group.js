@@ -9,22 +9,49 @@ export async function getJoinLinks(env) {
   return chats.results || [];
 }
 
-export async function ensureJoinRequestLink(env, chatId) {
-  // Create a join-request invite link that is long-lived. Telegram may return existing links but we'll just create a new one and store it in KV cache.
+function parseCachedInvite(cached) {
+  if (!cached) return null;
+  if (cached.startsWith("http")) return { invite_link: cached, name: "" };
+  try {
+    const parsed = JSON.parse(cached);
+    if (parsed?.invite_link) return parsed;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function buildVipInviteName(title, chatId) {
+  const base = title ? `VIP入口-${title}` : `VIP入口-${chatId}`;
+  return base.slice(0, 32);
+}
+
+export async function ensureVipInviteLink(env, chatId, title = "") {
+  // Create a permanent VIP join-request invite link and store in KV cache.
   const cacheKey = `joinlink:${chatId}`;
-  const cached = await getKv(env).get(cacheKey);
+  const cached = parseCachedInvite(await getKv(env).get(cacheKey));
   if (cached) return cached;
 
   // createChatInviteLink supports creates_join_request for groups/channels that require approval.
   // Note: For best results, also set the chat to require join request in Telegram settings.
+  const name = buildVipInviteName(title, chatId);
   const res = await tgCall(env, "createChatInviteLink", {
     chat_id: chatId,
     creates_join_request: true,
-    name: "VIP申请入口",
+    name,
   });
-  const link = res.invite_link;
-  await getKv(env).put(cacheKey, link);
-  return link;
+  const payload = {
+    invite_link: res.invite_link,
+    name: res.name || name,
+    created_at: nowSec(),
+  };
+  await getKv(env).put(cacheKey, JSON.stringify(payload));
+  return payload;
+}
+
+export async function ensureJoinRequestLink(env, chatId, title = "") {
+  const res = await ensureVipInviteLink(env, chatId, title);
+  return res.invite_link;
 }
 
 /** Build "Apply to join" button list for all managed chats */
@@ -36,7 +63,7 @@ export async function buildApplyButtons(env) {
 export async function buildApplyButtonsFromChats(env, chats) {
   const rows = [];
   for (const c of chats) {
-    const link = await ensureJoinRequestLink(env, c.chat_id);
+    const link = await ensureJoinRequestLink(env, c.chat_id, c.title);
     rows.push([{ text: c.title || String(c.chat_id), type: "url", url: link }]);
   }
   return rows;
