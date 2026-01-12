@@ -13,7 +13,7 @@ import { ensureUser, getDb, getTemplate } from "./db.js";
 import { getKv } from "./kv.js";
 import { isMember } from "./auth.js";
 import { extractCardCode, handleCardRedeem, isLikelyCardCode } from "./card.js";
-import { ensureVipInviteLink } from "./group.js";
+import { ensureVipInviteLinkForManagedChat } from "./group.js";
 import {
   buildImageSearchLinks,
   buildSignedProxyUrl,
@@ -2568,6 +2568,9 @@ export async function handleWebhook(env, update, requestUrl) {
         // ignore
       }
       return;
+    }
+    if (chat?.id && (newStatus === "administrator" || newStatus === "creator")) {
+      await ensureVipInviteLinkForManagedChat(env, chat.id, chat.title || "");
     }
   }
 

@@ -49,6 +49,23 @@ export async function ensureVipInviteLink(env, chatId, title = "") {
   return payload;
 }
 
+export async function ensureVipInviteLinkForManagedChat(env, chatId, title = "") {
+  const managed = await getDb(env)
+    .prepare(`SELECT chat_id,title,is_enabled FROM managed_chats WHERE chat_id=?`)
+    .bind(chatId)
+    .first();
+  if (!managed || managed.is_enabled !== 1) return null;
+  const nextTitle = title || managed.title || "";
+  if (nextTitle && nextTitle !== managed.title) {
+    await getDb(env).prepare(`UPDATE managed_chats SET title=? WHERE chat_id=?`).bind(nextTitle, chatId).run();
+  }
+  try {
+    return await ensureVipInviteLink(env, chatId, nextTitle);
+  } catch {
+    return null;
+  }
+}
+
 export async function ensureJoinRequestLink(env, chatId, title = "") {
   const res = await ensureVipInviteLink(env, chatId, title);
   return res.invite_link;
